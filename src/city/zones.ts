@@ -45,7 +45,9 @@ export interface Cell {
   /** 手前の道路の路面の高さ */
   roadY: number;
   zone: ZoneId;
+  /** 建物の id。がれきは負の値 */
   building: number;
+  facility: number;
 }
 
 export const cellKey = (seg: number, side: number, i: number, depth: number) => `${seg}:${side}:${i}:${depth}`;
@@ -94,7 +96,7 @@ export function generateCells(net: RoadNetwork, terrain: Terrain, previous: Map<
           if (nearOtherRoad({ x, z }, s.id, half)) break;
           candidates.push({
             key: cellKey(s.id, side, i, depth), seg: s.id, side, i, depth, x, z, y,
-            ax: tan.x, az: tan.z, nx: nrm.x * side, nz: nrm.z * side, roadY, zone: 0, building: 0,
+            ax: tan.x, az: tan.z, nx: nrm.x * side, nz: nrm.z * side, roadY, zone: 0, building: 0, facility: 0,
           });
         }
       }

@@ -8,9 +8,25 @@ import { AI_MAYORS, FACTIONS, OPPOSITION_ACTIONS, PLEDGES, isElectionYear, type 
 import { EDGE_NAMES, NEIGHBOR_KINDS } from '../city/region';
 import { dateOf, formatDate } from '../sim/clock';
 
-export type PanelId = 'finance' | 'people' | 'politics' | 'region' | 'news';
+import { DECREES, POLICIES, decreeActive, type DecreeId, type PolicyId } from '../city/policies';
+import { IMPORT, UTILITY_NAMES, UTILITY_UNITS, type Utility } from '../city/services';
+import { prob30 } from '../city/disasters';
+import type { InfoMode } from '../render/infoView';
 
-const TITLES: Record<PanelId, string> = { finance: '財政', people: '住民', politics: '政治', region: '地域', news: '新聞' };
+export type PanelId = 'finance' | 'people' | 'politics' | 'region' | 'policy' | 'info' | 'news';
+
+const TITLES: Record<PanelId, string> = { finance: '財政', people: '住民', politics: '政治', region: '地域', policy: '政策と布告', info: '情報とハザードマップ', news: '新聞' };
+
+const INFO_VIEWS: { mode: InfoMode; label: string; group: string }[] = [
+  { mode: 'none', label: 'ふつう', group: '表示' },
+  { mode: 'power', label: '電気', group: 'インフラ' }, { mode: 'water', label: '水道', group: 'インフラ' },
+  { mode: 'sewage', label: '下水', group: 'インフラ' }, { mode: 'garbage', label: 'ゴミ', group: 'インフラ' },
+  { mode: 'fire', label: '消防', group: 'サービス' }, { mode: 'police', label: '警察', group: 'サービス' },
+  { mode: 'health', label: '医療', group: 'サービス' }, { mode: 'education', label: '教育', group: 'サービス' },
+  { mode: 'happiness', label: '満足度', group: 'サービス' },
+  { mode: 'flood', label: '浸水', group: 'ハザードマップ' }, { mode: 'liquefaction', label: '液状化', group: 'ハザードマップ' },
+  { mode: 'landslide', label: '土砂災害', group: 'ハザードマップ' }, { mode: 'shaking', label: '揺れやすさ', group: 'ハザードマップ' },
+];
 
 const h = <K extends keyof HTMLElementTagNameMap>(tag: K, props: Partial<HTMLElementTagNameMap[K]> & { cls?: string } = {}, ...kids: (Node | string)[]) => {
   const el = document.createElement(tag);
@@ -41,8 +57,11 @@ export class Panels {
   private el = document.getElementById('panel')!;
   private seen = -1;
   private seenNews = 0;
+  infoMode: InfoMode = 'none';
+  private lastRender = 0;
+  private policyDistrict = 0;
 
-  constructor(private getCity: () => City, private ui: { toast: (m: string) => void }) {
+  constructor(private getCity: () => City, private ui: { toast: (m: string) => void; setInfo: (m: InfoMode) => void }) {
     document.querySelectorAll<HTMLButtonElement>('.rail button[data-panel]').forEach((b) => {
       b.onclick = () => this.toggle(b.dataset.panel as PanelId);
     });
@@ -51,6 +70,8 @@ export class Panels {
 
   toggle(id: PanelId, force = false): void {
     this.open = this.open === id && !force ? null : id;
+    // 情報パネルを閉じたら、ふつうの表示に戻す
+    if (this.open !== 'info' && this.infoMode !== 'none') { this.infoMode = 'none'; this.ui.setInfo('none'); }
     if (this.open === 'news') this.seenNews = this.getCity().versions.news;
     this.seen = -1;
     this.render();
@@ -59,7 +80,7 @@ export class Panels {
   /** 毎フレーム呼ぶ。変化があったときだけ描き直す */
   update(): void {
     const c = this.getCity();
-    const v = c.versions.economy * 1000 + c.versions.news + c.versions.buildings * 7;
+    const v = c.versions.economy * 1000 + c.versions.news + c.versions.buildings * 7 + c.versions.services * 13 + c.versions.fires * 17;
     document.querySelectorAll<HTMLButtonElement>('.rail button[data-panel]').forEach((b) => {
       b.setAttribute('aria-pressed', String(b.dataset.panel === this.open));
     });
@@ -72,10 +93,15 @@ export class Panels {
     if (ticker.textContent !== text) ticker.textContent = text;
     if (this.open === 'news') this.seenNews = c.versions.news;
     if (v === this.seen) return;
+    // マウスがパネルの上にある間は描き直さない。それ以外も 1.5 秒に 1 回まで（ボタンを押しやすくする）
+    if (this.seen !== -1 && this.el.matches(':hover')) return;
+    const now = performance.now();
+    if (this.seen !== -1 && now - this.lastRender < 1500) return;
     // 入力中（税率のつまみを動かしている間など）は描き直さない
     const active = document.activeElement;
     if (active && this.el.contains(active) && active.tagName === 'INPUT') return;
     this.seen = v;
+    this.lastRender = now;
     this.render();
   }
 
@@ -85,7 +111,10 @@ export class Panels {
     const c = this.getCity();
     const body = h('div', { cls: 'pbody' });
     const head = h('div', { cls: 'phead' }, h('h2', {}, TITLES[this.open]), h('button', { cls: 'close', onclick: () => this.toggle(this.open!), title: '閉じる' }, '×'));
-    ({ finance: () => this.finance(c, body), people: () => this.people(c, body), politics: () => this.politics(c, body), region: () => this.region(c, body), news: () => this.newsList(c, body) })[this.open]();
+    ({
+      finance: () => this.finance(c, body), people: () => this.people(c, body), politics: () => this.politics(c, body),
+      region: () => this.region(c, body), policy: () => this.policy(c, body), info: () => this.info(c, body), news: () => this.newsList(c, body),
+    })[this.open]();
     const scroll = this.el.querySelector('.pbody')?.scrollTop ?? 0;
     this.el.replaceChildren(head, body);
     body.scrollTop = scroll;
@@ -219,6 +248,93 @@ export class Panels {
         row('関係', h('span', { cls: 'v' }, bar(n.relation, 100, n.relation >= 0 ? '#3ea865' : '#d9573f', true), ` ${Math.round(n.relation)}`)),
         row('道路', n.connected ? 'つながっている' : `未接続（地図の${EDGE_NAMES[n.edge].replace('（山側）', '')}端まで道路を引く）`, n.connected ? 'pos' : ''),
         row('通勤', n.connected ? `行く ${n.outCommute.toLocaleString()} 人／来る ${n.inCommute.toLocaleString()} 人` : '—')));
+    }
+  }
+
+  private policy(c: City, el: HTMLElement): void {
+    const blocked = c.blockedReason();
+    if (blocked) el.append(h('p', { cls: 'alert' }, blocked));
+    el.append(h('h3', {}, '政策をかける場所'));
+    const seg = h('div', { cls: 'chips' });
+    const places = [{ id: 0, name: '市全体' }, ...c.districts.list.map((d) => ({ id: d.id, name: d.name }))];
+    if (!places.some((p) => p.id === this.policyDistrict)) this.policyDistrict = 0;
+    for (const p of places) {
+      seg.append(h('button', { onclick: () => { this.policyDistrict = p.id; this.seen = -1; this.render(); }, ariaPressed: String(this.policyDistrict === p.id) }, p.name));
+    }
+    el.append(seg);
+    if (!c.districts.list.length) el.append(h('p', { cls: 'note' }, '地区を塗り分けると、地区ごとに政策をかけられます。'));
+    const active = c.policies.districts[this.policyDistrict] ?? [];
+    for (const [id, def] of Object.entries(POLICIES) as [PolicyId, (typeof POLICIES)[PolicyId]][]) {
+      const on = active.includes(id);
+      const cost = def.costFlat ? `月 ${formatYen(def.costFlat)}` : def.costPerBuilding ? `旧耐震 1 棟あたり月 ${formatYen(def.costPerBuilding)}` : '費用なし';
+      el.append(h('div', { cls: 'policy-row' },
+        h('button', { onclick: () => c.togglePolicy(this.policyDistrict, id), ariaPressed: String(on), disabled: !!blocked }, on ? '実施中' : '実施'),
+        h('div', {}, h('b', {}, def.name), h('p', { cls: 'note' }, `${def.effect}（${cost}）`))));
+    }
+    el.append(h('h3', {}, '布告（市全体）'));
+    for (const [id, def] of Object.entries(DECREES) as [DecreeId, (typeof DECREES)[DecreeId]][]) {
+      const on = decreeActive(c.policies, id, c.day);
+      const label = def.kind === 'toggle' ? (on ? '解除する' : '出す') : on ? '実施中' : '出す';
+      el.append(h('div', { cls: 'policy-row' },
+        h('button', { onclick: () => { const r = c.decree(id); if (r) this.ui.toast(r); }, ariaPressed: String(on), disabled: !!blocked || (def.kind === 'once' && on) }, label),
+        h('div', {}, h('b', {}, def.name), h('p', { cls: 'note' }, def.effect))));
+    }
+  }
+
+  private info(c: City, el: HTMLElement): void {
+    let group = '';
+    let seg: HTMLElement | null = null;
+    for (const v of INFO_VIEWS) {
+      if (v.group !== group) {
+        group = v.group;
+        el.append(h('h3', {}, group));
+        seg = h('div', { cls: 'chips' });
+        el.append(seg);
+      }
+      seg!.append(h('button', { ariaPressed: String(this.infoMode === v.mode), onclick: () => { this.infoMode = v.mode; this.ui.setInfo(v.mode); this.seen = -1; this.render(); } }, v.label));
+    }
+    const m = this.infoMode;
+    if (['power', 'water', 'sewage', 'garbage'].includes(m)) {
+      el.append(h('div', { cls: 'chips' }, h('span', {}, h('i', { style: 'background:#3f93dc' } as never), '届いている'), h('span', {}, h('i', { style: 'background:#e0513e' } as never), '届いていない')));
+    } else if (['fire', 'police', 'health', 'education', 'happiness'].includes(m)) {
+      el.append(h('div', { cls: 'chips' }, h('span', {}, h('i', { style: 'background:#3f93dc' } as never), '十分'), h('span', {}, h('i', { style: 'background:#5fbf6a' } as never), 'まあまあ'), h('span', {}, h('i', { style: 'background:#e8b83e' } as never), '不足'), h('span', {}, h('i', { style: 'background:#e0513e' } as never), '届いていない')));
+      if (m !== 'happiness') el.append(h('p', { cls: 'note' }, '水色の円は施設のサービスが届く範囲です。'));
+    } else if (['flood', 'liquefaction', 'landslide', 'shaking'].includes(m)) {
+      const bar = h('i');
+      bar.style.background = 'linear-gradient(90deg, #f7f5a8, #ffd87a, #f7a660, #e8615a, #b34a8f)';
+      el.append(h('div', { cls: 'legend' }, '低い', bar, '高い'));
+      const notes: Record<string, string> = {
+        flood: '川があふれたときや高潮のときに水につかりやすい場所。濃いほど深い（最大 5 m 程度）。',
+        liquefaction: '地震のとき地面が液状になって建物が傾きやすい場所。海辺や川沿いの低い土地。',
+        landslide: 'がけ崩れや土石流が起きやすい急な斜面。',
+        shaking: '地盤がやわらかく、地震で揺れが大きくなりやすい場所。',
+      };
+      el.append(h('p', { cls: 'note' }, notes[m]));
+    }
+
+    const s = c.services;
+    if (s) {
+      el.append(h('h3', {}, 'インフラ（供給／需要）'));
+      for (const k of Object.keys(UTILITY_NAMES) as Utility[]) {
+        const u = s.util[k];
+        const txt = `${Math.round(u.supply).toLocaleString()}／${Math.round(u.demand).toLocaleString()} ${UTILITY_UNITS[k]}・届いている ${pct(u.served, 0)}${u.imported > 0 ? `（隣町から ${Math.round(u.imported).toLocaleString()} を購入）` : ''}`;
+        el.append(row(UTILITY_NAMES[k], txt, u.served < 0.95 ? 'neg' : ''));
+      }
+      el.append(h('p', { cls: 'note' }, `電線と水道管は道路に沿って通ります。発電所や浄水場と道路でつながっていない建物には届きません。地図の端で隣町とつながっていれば、足りない分を買えます（電気は最大 ${IMPORT.power.cap.toLocaleString()} kW）。`));
+      el.append(h('h3', {}, 'サービスが届いている住民'));
+      el.append(row('消防', pct(s.coverage.fire, 0)), row('警察', pct(s.coverage.police, 0)), row('医療', pct(s.coverage.health, 0)), row('教育', pct(s.coverage.education, 0)));
+    }
+    el.append(h('h3', {}, '防災'));
+    const since = yearOf(c.day) - (c.meta.lastQuakeYear ?? 0);
+    el.append(row('今後 30 年以内に大地震（M7 前後）が起きる確率', pct(prob30(since), 0)));
+    el.append(row('燃えている建物', `${c.fires.length} 棟`, c.fires.length ? 'neg' : ''));
+    el.append(row('がれき', `${c.rubble.length} か所`));
+    el.append(row('旧耐震の建物', pct(c.stats.oldSeismicShare, 0)));
+    if (c.quakes.length) {
+      el.append(h('h3', {}, '地震の記録'));
+      for (const q of [...c.quakes].reverse().slice(0, 6)) {
+        el.append(row(formatDate(dateOf(q.day)), `M${q.magnitude}・最大震度 ${q.maxShindo}・全壊 ${q.collapsed}・損傷 ${q.damaged}`));
+      }
     }
   }
 

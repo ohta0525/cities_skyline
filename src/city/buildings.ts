@@ -63,7 +63,15 @@ export interface Building {
   built: number;
   /** 旧耐震基準か新耐震基準か */
   seismic: 'old' | 'new';
+  /** 防火地域で建った燃えにくい建物 */
+  fireproof?: boolean;
+  /** 被災して修理を待っている期限（日）。0 なら無事 */
+  damagedUntil?: number;
 }
+
+/** 木造の建物 */
+export const WOODEN: BuildingKind[] = ['house', 'apartment', 'shopHouse', 'machiKoba'];
+export const isWooden = (b: Pick<Building, 'kind' | 'fireproof'>) => WOODEN.includes(b.kind) && !b.fireproof;
 
 /** 建物の資産価値（万円）。固定資産税の元になる */
 export function buildingValue(b: Pick<Building, 'floors' | 'w' | 'd' | 'zone'>): number {

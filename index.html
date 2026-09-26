@@ -77,6 +77,18 @@
       </div>
     </fieldset>
     <fieldset>
+      <legend>災害</legend>
+      <div class="seg" role="radiogroup">
+        <label><input type="radio" name="disasters" id="disOn" value="on"><span>起こる</span></label>
+        <label><input type="radio" name="disasters" id="disOff" value="off"><span>起こらない</span></label>
+      </div>
+      <p class="note">試しに地震を起こして、備えを確かめられます。</p>
+      <div class="row">
+        <button id="quakeMid">地震を起こす（M6.3）</button>
+        <button id="quakeBig">大地震を起こす（M7.2）</button>
+      </div>
+    </fieldset>
+    <fieldset>
       <legend>新しい街</legend>
       <p class="note">新しい地形を生成して、1 年目からやり直します。今の街は保存しない限り消えます。</p>
       <button id="btnNew" class="danger">新しい街を始める</button>
@@ -104,6 +116,7 @@
       <li>需要（画面上の 住・商・工 のバー）に応じて、建物が建っていきます</li>
       <li>「地区」で町を塗り分けると、町名が付きます</li>
       <li>左の「財政」で税率と市債、「住民」で失業や満足度、「地域」で隣町との通勤を確認できます</li>
+      <li>「施設」で発電所や浄水場を建て、道路でつなぐと電気と水道が届きます。消防署・交番・病院・学校も必要です</li>
       <li>4 年ごとに市長選挙があります。「政治」で派閥の支持を見ながら、公約を掲げて再選を目指します</li>
     </ol>
   </aside>
@@ -115,6 +128,8 @@
     <button data-panel="people" aria-pressed="false">住民</button>
     <button data-panel="politics" aria-pressed="false">政治<i id="politicsBadge" class="badge" hidden></i></button>
     <button data-panel="region" aria-pressed="false">地域</button>
+    <button data-panel="policy" aria-pressed="false">政策</button>
+    <button data-panel="info" aria-pressed="false">情報</button>
     <button data-panel="news" aria-pressed="false">新聞<i id="newsBadge" class="badge" hidden></i></button>
   </nav>
   <aside id="panel" class="panel cityhall" hidden></aside>
@@ -135,6 +150,7 @@
     <div class="tools" role="toolbar">
       <button data-tool="road" aria-pressed="false"><i class="ico road"></i>道路</button>
       <button data-tool="zone" aria-pressed="false"><i class="ico zone"></i>区画</button>
+      <button data-tool="facility" aria-pressed="false"><i class="ico facility"></i>施設</button>
       <button data-tool="district" aria-pressed="false"><i class="ico district"></i>地区</button>
       <button data-tool="bulldoze" aria-pressed="false"><i class="ico bulldoze"></i>撤去</button>
     </div>

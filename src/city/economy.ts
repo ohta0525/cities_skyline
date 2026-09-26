@@ -43,12 +43,13 @@ export const LOAN_MONTHS = 120;
 export const MAX_DEBT = 300_000;
 
 export type IncomeKey = 'res' | 'biz' | 'prop' | 'trade' | 'grant' | 'other';
-export type ExpenseKey = 'roads' | 'loans' | 'construction' | 'defense' | 'other';
+export type ExpenseKey = 'roads' | 'services' | 'imports' | 'policies' | 'loans' | 'construction' | 'defense' | 'other';
 export const INCOME_NAMES: Record<IncomeKey, string> = {
   res: '住民税', biz: '法人の税', prop: '固定資産税', trade: '交易', grant: '国からの交付金', other: 'その他',
 };
 export const EXPENSE_NAMES: Record<ExpenseKey, string> = {
-  roads: '道路の維持費', loans: '市債の返済', construction: '建設費', defense: '防衛費', other: 'その他',
+  roads: '道路の維持費', services: '施設の維持費', imports: '電気・水などの購入', policies: '政策', loans: '市債の返済',
+  construction: '建設費', defense: '防衛費', other: '災害復旧など',
 };
 
 export interface MonthReport {
@@ -135,6 +136,9 @@ export interface MonthInputs {
   trade: number;
   grant: number;
   defense: number;
+  services?: number;
+  imports?: number;
+  policies?: number;
 }
 
 /** 月末の締め。収支を計算して資金に反映し、報告を返す */
@@ -159,11 +163,12 @@ export function closeMonth(e: EconomyState, m: MonthInputs): MonthReport {
   e.loans = e.loans.filter((l) => l.remaining > 0.5 && l.monthsLeft > 0);
   let roads = 0;
   for (const k of Object.keys(m.roadLength) as RoadType[]) roads += m.roadLength[k] * ROAD_UPKEEP[k];
+  const services = m.services ?? 0, imports = m.imports ?? 0, policies = m.policies ?? 0;
   const expense: Record<ExpenseKey, number> = {
-    roads, loans: loanPay, construction: e.pending.construction, defense: m.defense, other: e.pending.other,
+    roads, services, imports, policies, loans: loanPay, construction: e.pending.construction, defense: m.defense, other: e.pending.other,
   };
   // 建設費・払い戻しはその場で資金に反映済みなので、ここでは定常の収支だけ動かす
-  const recurring = income.res + income.biz + income.prop + income.trade + income.grant - roads - loanPay - m.defense;
+  const recurring = income.res + income.biz + income.prop + income.trade + income.grant - roads - services - imports - policies - loanPay - m.defense;
   e.money += recurring;
   const net = Object.values(income).reduce((a, b) => a + b, 0) - Object.values(expense).reduce((a, b) => a + b, 0);
   const report: MonthReport = { day: m.day, income, expense, net, money: e.money };

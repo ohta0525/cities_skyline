@@ -51,6 +51,9 @@ export class World3D {
   private shadowExtent = 0;
   private aoRadius = 0;
   private time = 0;
+  private shakeLeft = 0;
+  private shakeTotal = 1;
+  private shakeAmp = 0;
 
   constructor(private canvas: HTMLCanvasElement, quality: Quality, miniature: number) {
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: false, powerPreference: 'high-performance' });
@@ -175,6 +178,13 @@ export class World3D {
     this.water.uniforms.time.value = this.time;
     this.controls.update(dt);
     const d = this.controls.distance;
+    if (this.shakeLeft > 0) {
+      this.shakeLeft -= dt;
+      const k = Math.max(0, this.shakeLeft / this.shakeTotal) * this.shakeAmp * (0.4 + d / 2500);
+      this.camera.position.x += (Math.random() - 0.5) * k;
+      this.camera.position.y += (Math.random() - 0.5) * k * 0.6;
+      this.camera.position.z += (Math.random() - 0.5) * k;
+    }
 
     // 影はカメラの注視点のまわりだけに当てる
     const t = this.controls.target;
@@ -248,6 +258,12 @@ export class World3D {
     this.raycaster.setFromCamera(ndc, this.camera);
     const hit = new THREE.Vector3();
     return this.raycaster.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 1, 0), -y), hit);
+  }
+
+  /** 地震の揺れの演出 */
+  shake(amplitude: number, seconds: number): void {
+    this.shakeAmp = amplitude;
+    this.shakeLeft = this.shakeTotal = seconds;
   }
 
   /** 方位磁針用：カメラが北から何ラジアン回っているか */

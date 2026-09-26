@@ -91,6 +91,12 @@ export interface PoliticalMetrics {
   moneyHealthy: boolean;
   debtRatio: number;
   jobsGrowth: number;
+  /** 警察が届いていない住民の割合 */
+  crime?: number;
+  /** 教育が届いている住民の割合 */
+  education?: number;
+  /** 施設・政策・布告による上乗せ */
+  extra?: Partial<Record<FactionId, number>>;
 }
 
 const clamp = (v: number) => Math.max(0, Math.min(100, v));
@@ -98,13 +104,13 @@ const clamp = (v: number) => Math.max(0, Math.min(100, v));
 /** 月ごとに派閥の支持と割合、全体の支持率を計算し直す */
 export function updateSupport(p: PoliticsState, m: PoliticalMetrics): void {
   p.modifiers = p.modifiers.filter((x) => x.until > m.day);
-  const mod = (id: FactionId) => p.modifiers.filter((x) => x.faction === id || x.faction === 'all').reduce((s, x) => s + x.amount, 0);
+  const mod = (id: FactionId) => p.modifiers.filter((x) => x.faction === id || x.faction === 'all').reduce((s, x) => s + x.amount, 0) + (m.extra?.[id] ?? 0);
   const broke = m.bankrupt ? -18 : 0;
   const raw: Record<FactionId, number> = {
     business: 55 + (10 - m.taxes.biz) * 4 + Math.max(-15, Math.min(15, m.jobsGrowth * 0.3)) + broke,
     labor: 62 - m.unemployment * 220 + (10 - m.taxes.res) * 3.5 + broke * 0.5,
-    tradition: 52 + (m.lowriseShare - 0.5) * 30 + (m.moneyHealthy ? 6 : -8) - m.debtRatio * 10 + broke,
-    progress: 45 + (m.happiness - 50) * 0.5 + broke * 0.5,
+    tradition: 52 + (m.lowriseShare - 0.5) * 30 + (m.moneyHealthy ? 6 : -8) - m.debtRatio * 10 + broke - (m.crime ?? 0) * 14,
+    progress: 45 + (m.happiness - 50) * 0.5 + broke * 0.5 + ((m.education ?? 0.5) - 0.5) * 12,
     green: 62 - m.pollution * 90 - m.industryShare * 25,
     defense: 50 + (m.moneyHealthy ? 5 : -5) + broke * 0.5,
   };

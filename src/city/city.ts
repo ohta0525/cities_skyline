@@ -1,6 +1,12 @@
 import { mulberry32 } from '../core/rng';
 import type { Terrain } from '../world/terrain';
-import { KINDS, buildingValue, kindsForZone, weightedOrder, type Building, type BuildingKind } from './buildings';
+import { KINDS, buildingValue, isWooden, kindsForZone, weightedOrder, type Building, type BuildingKind } from './buildings';
+import { FACILITIES, type Facility, type FacilityKind } from './facilities';
+import { computeServices, type ServiceReport } from './services';
+import { bigQuakeRate, intensityAt, liquefaction, quakeDamage, quakeFireChance, shindoLabel, type Fire, type QuakeReport, type Rubble } from './disasters';
+import { DECREES, POLICIES, decreeActive, hasPolicy, newPolicies, type DecreeId, type PolicyId, type PolicyState } from './policies';
+import type { FactionId } from './politics';
+import { waterLevelAt } from '../world/terrain';
 import { Districts, type District } from './districts';
 import {
   DEFAULT_TAXES, ROAD_COST, BRIDGE_FACTOR, ROAD_REFUND, closeMonth, formatYen, newEconomy, planCost, refund, setTax, spend, takeLoan,
@@ -47,6 +53,18 @@ export interface CityMeta {
   rank: number;
   milestone: number;
   aiStartDay: number;
+  lastQuakeYear?: number;
+  lastUtilityWarn?: number;
+}
+
+export interface FacilityPlan {
+  ok: boolean;
+  reason?: string;
+  kind: FacilityKind;
+  cells: Cell[];
+  cost: number;
+  /** 敷地の正面の中央と向き（見本の表示用） */
+  x: number; z: number; y: number; ax: number; az: number; nx: number; nz: number;
 }
 
 export interface CityData {
@@ -60,6 +78,12 @@ export interface CityData {
   region?: RegionState;
   news?: NewsItem[];
   meta?: CityMeta;
+  facilities?: Facility[];
+  nextFacilityId?: number;
+  fires?: Fire[];
+  rubble?: Rubble[];
+  policies?: PolicyState;
+  quakes?: QuakeReport[];
 }
 
 const clamp = (v: number) => Math.max(-100, Math.min(100, v));
@@ -85,14 +109,24 @@ export class City {
   region: RegionState;
   news: NewsItem[] = [];
   meta: CityMeta = { rank: 0, milestone: -1, aiStartDay: 0 };
+  facilities = new Map<number, Facility>();
+  fires: Fire[] = [];
+  rubble: Rubble[] = [];
+  policies: PolicyState = newPolicies();
+  quakes: QuakeReport[] = [];
+  services: ServiceReport | null = null;
+  /** 災害を起こすかどうか（設定） */
+  disastersEnabled = true;
+  private nextFacilityId = 1;
+  private nextRubbleId = 1;
   day = 0;
   stats: CityStats = { ...EMPTY_STATS };
   /** 変更のたびに増える番号。描画側はこれを見て作り直す */
-  versions = { roads: 0, cells: 0, buildings: 0, districts: 0, economy: 0, news: 0 };
+  versions = { roads: 0, cells: 0, buildings: 0, districts: 0, economy: 0, news: 0, facilities: 0, fires: 0, services: 0 };
   /** 地形を変えた範囲（描画側が取り出して反映する） */
   terrainChanges: GridRange[] = [];
   /** 画面に知らせたい出来事（選挙結果など）。描画側が取り出す */
-  events: { type: 'election'; result: ElectionResult }[] = [];
+  events: ({ type: 'election'; result: ElectionResult } | { type: 'quake'; report: QuakeReport })[] = [];
   private nextBuildingId = 1;
   private rand: () => number;
   private lastJobs = 0;
@@ -170,12 +204,46 @@ export class City {
   private afterRoadChange(): void {
     const old = this.cells;
     this.cells = generateCells(this.net, this.terrain, old);
+    this.rehomeFacilities();
     this.rehomeBuildings();
     updateConnections(this.region, this.net);
+    this.refreshServices();
     this.versions.roads++;
     this.versions.cells++;
     this.versions.economy++;
     this.recount();
+  }
+
+  /** 道路が変わったあと、施設とがれきを新しいマスに載せ直す */
+  private rehomeFacilities(): void {
+    const index = this.cellIndex();
+    for (const f of this.facilities.values()) {
+      const keys: string[] = [];
+      for (let k = 0; k < f.cellPos.length; k += 2) {
+        const c = this.findCell(index, f.cellPos[k], f.cellPos[k + 1]);
+        if (!c || c.facility) break;
+        c.facility = f.id;
+        keys.push(c.key);
+      }
+      if (keys.length * 2 !== f.cellPos.length) {
+        for (const k of keys) this.cells.get(k)!.facility = 0;
+        this.facilities.delete(f.id);
+        this.say(`道路の変更で${FACILITIES[f.kind].name}が使えなくなり、取り壊されました`, 'bad');
+        continue;
+      }
+      f.cells = keys;
+    }
+    this.rubble = this.rubble.filter((r) => {
+      const cs: Cell[] = [];
+      for (let k = 0; k < r.cellPos.length; k += 2) {
+        const c = this.findCell(index, r.cellPos[k], r.cellPos[k + 1]);
+        if (c && !c.facility) cs.push(c);
+      }
+      for (const c of cs) c.building = -r.id;
+      return cs.length > 0;
+    });
+    this.versions.facilities++;
+    this.versions.fires++;
   }
 
   /** 道路が変わったあと、建物を新しいマスに載せ直す。載らない建物は取り壊す */
@@ -185,7 +253,7 @@ export class City {
       const keys: string[] = [];
       for (let k = 0; k < b.cellPos.length; k += 2) {
         const c = this.findCell(index, b.cellPos[k], b.cellPos[k + 1]);
-        if (!c || c.building || c.zone !== b.zone) break;
+        if (!c || c.building || c.facility || c.zone !== b.zone) break;
         c.building = b.id;
         keys.push(c.key);
       }
@@ -230,8 +298,8 @@ export class City {
     for (const c of this.cells.values()) {
       if (Math.abs(c.x - center.x) > radius || Math.abs(c.z - center.z) > radius) continue;
       if (Math.hypot(c.x - center.x, c.z - center.z) > radius) continue;
-      if (c.zone === zone || (onlyEmpty && c.zone)) continue;
-      if (c.building) this.removeBuilding(c.building);
+      if (c.zone === zone || (onlyEmpty && c.zone) || c.facility) continue;
+      if (c.building > 0) this.removeBuilding(c.building);
       c.zone = zone;
       changed++;
     }
@@ -262,6 +330,7 @@ export class City {
       d++;
       this.day = d;
       this.growDay(d);
+      this.disasterDay(d);
       if (d % 30 === 0) this.monthly(d);
       if (d % 360 === 0) this.yearly(d);
     }
@@ -276,7 +345,7 @@ export class City {
     for (const [group, demand] of groups) {
       if (demand <= 0) continue;
       const zones = new Set(ZONES.filter((z) => z.group === group).map((z) => z.id as number));
-      const fronts = [...this.cells.values()].filter((c) => c.depth === 0 && !c.building && zones.has(c.zone));
+      const fronts = [...this.cells.values()].filter((c) => c.depth === 0 && !c.building && !c.facility && zones.has(c.zone));
       if (!fronts.length) continue;
       const attempts = Math.ceil(demand / 30);
       for (let a = 0; a < attempts; a++) {
@@ -292,8 +361,15 @@ export class City {
   }
 
   private tryBuild(front: Cell, day: number): boolean {
+    // 電気や水道が足りないと建ちにくい
+    const u = this.services?.util;
+    if (u && (u.power.served < 0.6 || u.water.served < 0.6) && this.rand() < 0.7) return false;
+    const district = this.districts.at(front)?.id ?? 0;
+    if (hasPolicy(this.policies, district, 'fireproof') && this.rand() < 0.2) return false;
     const era = eraOf(yearOf(day));
-    const kinds = weightedOrder(kindsForZone(front.zone).filter((k) => !era.locked.includes(k)), (k) => KINDS[k].weight, this.rand);
+    const lowOnly = hasPolicy(this.policies, district, 'heightLimit');
+    const allowed = kindsForZone(front.zone).filter((k) => !era.locked.includes(k) && (!lowOnly || KINDS[k].floors[0] <= 4));
+    const kinds = weightedOrder(allowed, (k) => KINDS[k].weight, this.rand);
     for (const kind of kinds) {
       const def = KINDS[kind];
       const lots = weightedOrder(def.lots, () => 1, this.rand);
@@ -310,7 +386,7 @@ export class City {
     for (let k = 0; k < w; k++) {
       for (let dd = 0; dd < d; dd++) {
         const c = this.cells.get(cellKey(front.seg, front.side, front.i + k, dd));
-        if (!c || c.building || c.zone !== front.zone) return null;
+        if (!c || c.building || c.facility || c.zone !== front.zone) return null;
         out.push(c);
       }
     }
@@ -328,7 +404,9 @@ export class City {
     const la = Math.hypot(ax, az) || 1, ln = Math.hypot(nx, nz) || 1;
     const def = KINDS[kind];
     const year = yearOf(day);
-    const cap = eraOf(year).maxFloors[kind] ?? def.floors[1];
+    const district = this.districts.at({ x: x / n, z: z / n })?.id ?? 0;
+    let cap = eraOf(year).maxFloors[kind] ?? def.floors[1];
+    if (hasPolicy(this.policies, district, 'heightLimit')) cap = Math.min(cap, 4);
     const hi = Math.max(def.floors[0], Math.min(def.floors[1], cap));
     const floors = def.floors[0] + Math.floor(this.rand() * (hi - def.floors[0] + 1));
     const id = this.nextBuildingId++;
@@ -339,6 +417,8 @@ export class City {
       cells: cells.map((c) => c.key), cellPos: cells.flatMap((c) => [c.x, c.z]),
       residents: def.residents(floors, w, d), jobs: def.jobs(floors, w, d),
       built: year, seismic: year >= SEISMIC_LAW_YEAR ? 'new' : 'old',
+      fireproof: hasPolicy(this.policies, district, 'fireproof') && isWooden({ kind, fireproof: false }),
+      damagedUntil: 0,
     };
     for (const c of cells) c.building = id;
     this.buildings.set(id, b);
@@ -419,6 +499,8 @@ export class City {
   // ---------- 月と年の締め ----------
   private monthly(day: number): void {
     updateConnections(this.region, this.net);
+    this.refreshServices();
+    this.policyMonth(day);
     this.recount();
     const s = this.stats;
 
@@ -439,6 +521,9 @@ export class City {
       trade: tradeIncome(this.region, s.indJobs, s.comJobs),
       grant: 300 + s.population * 0.05,
       defense: aiActive && mayor === 'hawk' ? 800 : 0,
+      services: [...this.facilities.values()].reduce((a, f) => a + FACILITIES[f.kind].upkeep, 0),
+      imports: this.services?.importCost ?? 0,
+      policies: this.policyCost(),
     });
     if (!wasBankrupt && this.econ.bankrupt) this.say('財政再生団体に転落しました。新しい道路は作れず、税率も下げられません', 'bad');
     if (wasBankrupt && !this.econ.bankrupt) this.say('財政再生団体から脱しました', 'good');
@@ -464,7 +549,18 @@ export class City {
       moneyHealthy: this.econ.money > 0,
       debtRatio: Math.min(1, this.econ.loans.reduce((a, l) => a + l.remaining, 0) / 300_000),
       jobsGrowth: jobs - this.lastJobs,
+      crime: this.services?.crime ?? 0,
+      education: this.services?.coverage.education ?? 0,
+      extra: this.factionExtra(day),
     });
+    const u = this.services?.util;
+    if (u && this.buildings.size > 20 && day - (this.meta.lastUtilityWarn ?? -999) >= 180) {
+      const short = (['power', 'water'] as const).filter((k) => u[k].served < 0.9);
+      if (short.length) {
+        this.meta.lastUtilityWarn = day;
+        this.say(`${short.map((k) => (k === 'power' ? '電気' : '水道')).join('と')}が足りません。発電所や浄水場を建てるか、隣町と道路でつないで買いましょう`, 'bad');
+      }
+    }
     this.lastJobs = jobs;
     if (aiActive) this.aiMonth(mayor as AiMayorType, day);
 
@@ -572,13 +668,398 @@ export class City {
     }
   }
 
+
+  // ---------- 施設 ----------
+  /** カーソル位置に施設を置く計画（置けない理由も返す） */
+  planFacility(p: P2, kind: FacilityKind): FacilityPlan {
+    const def = FACILITIES[kind];
+    let front: Cell | null = null, best = 18;
+    for (const c of this.cells.values()) {
+      if (c.depth !== 0) continue;
+      const d = Math.hypot(c.x - p.x, c.z - p.z);
+      if (d < best) { best = d; front = c; }
+    }
+    const fail = (reason: string, cells: Cell[] = []): FacilityPlan => ({ ok: false, reason, kind, cells, cost: def.cost, ...this.lotFrame(cells, front) });
+    if (!front) return fail('道路沿いに置いてください');
+    const cells: Cell[] = [];
+    for (let k = 0; k < def.w; k++) {
+      for (let dd = 0; dd < def.d; dd++) {
+        const c = this.cells.get(cellKey(front.seg, front.side, front.i + k, dd));
+        if (!c) return fail('敷地が足りません（道路沿いの区画のマスが必要です）', cells);
+        if (c.facility) return fail('ほかの施設と重なっています', cells);
+        cells.push(c);
+      }
+    }
+    if (def.unlockYear && this.year < def.unlockYear) return fail(`${def.unlockYear} 年目から建てられます`, cells);
+    if (def.needsWater && !this.nearWater(cells)) return fail('川か海の近く（80 m 以内）に建ててください', cells);
+    const blocked = this.blockedReason();
+    if (blocked) return fail(blocked, cells);
+    if (this.econ.bankrupt) return fail('財政再生団体のため、新しい施設は建てられません', cells);
+    if (def.cost > this.econ.money) return fail(`資金が足りません（必要 ${formatYen(def.cost)}）`, cells);
+    return { ok: true, kind, cells, cost: def.cost, ...this.lotFrame(cells, front) };
+  }
+
+  private lotFrame(cells: Cell[], front: Cell | null) {
+    const fr = cells.filter((c) => c.depth === 0);
+    const src = fr.length ? fr : front ? [front] : [];
+    if (!src.length) return { x: 0, z: 0, y: 0, ax: 1, az: 0, nx: 0, nz: 1 };
+    let x = 0, z = 0, y = 0, ax = 0, az = 0, nx = 0, nz = 0;
+    for (const c of src) {
+      x += c.x - c.nx * CELL_SIZE / 2; z += c.z - c.nz * CELL_SIZE / 2;
+      y += c.roadY; ax += c.ax; az += c.az; nx += c.nx; nz += c.nz;
+    }
+    const n = src.length, la = Math.hypot(ax, az) || 1, ln = Math.hypot(nx, nz) || 1;
+    return { x: x / n, z: z / n, y: y / n + 0.15, ax: ax / la, az: az / la, nx: nx / ln, nz: nz / ln };
+  }
+
+  private nearWater(cells: Cell[]): boolean {
+    for (const c of cells) {
+      for (let k = 0; k < 16; k++) {
+        const a = (k / 16) * Math.PI * 2;
+        for (const r of [30, 55, 80]) {
+          if (waterLevelAt(this.terrain, c.x + Math.cos(a) * r, c.z + Math.sin(a) * r) !== null) return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  placeFacility(plan: FacilityPlan): number | null {
+    if (!plan.ok) return null;
+    const def = FACILITIES[plan.kind];
+    for (const c of plan.cells) {
+      if (c.building > 0) this.removeBuilding(c.building);
+      if (c.building < 0) this.clearRubble(-c.building, false);
+    }
+    const id = this.nextFacilityId++;
+    const f: Facility = {
+      id, kind: plan.kind, x: plan.x, z: plan.z, y: plan.y, ax: plan.ax, az: plan.az, nx: plan.nx, nz: plan.nz,
+      w: def.w, d: def.d, cells: plan.cells.map((c) => c.key), cellPos: plan.cells.flatMap((c) => [c.x, c.z]),
+      built: this.year, day: this.day, seed: Math.floor(this.rand() * 0xffffffff), downUntil: 0,
+    };
+    for (const c of plan.cells) { c.facility = id; c.zone = 0; }
+    this.facilities.set(id, f);
+    spend(this.econ, def.cost);
+    this.versions.facilities++;
+    this.versions.cells++;
+    this.versions.economy++;
+    this.refreshServices();
+    this.recount();
+    return id;
+  }
+
+  removeFacility(id: number): void {
+    const f = this.facilities.get(id);
+    if (!f) return;
+    for (const k of f.cells) { const c = this.cells.get(k); if (c) c.facility = 0; }
+    this.facilities.delete(id);
+    refund(this.econ, FACILITIES[f.kind].cost * ROAD_REFUND);
+    this.versions.facilities++;
+    this.versions.cells++;
+    this.refreshServices();
+    this.recount();
+  }
+
+  refreshServices(): void {
+    this.services = computeServices({
+      net: this.net, buildings: this.buildings.values(), facilities: this.facilities.values(), region: this.region, day: this.day,
+      powerSaving: decreeActive(this.policies, 'powerSaving', this.day), curfew: decreeActive(this.policies, 'curfew', this.day),
+    });
+    this.versions.services++;
+  }
+
+  // ---------- 災害 ----------
+  private disasterDay(day: number): void {
+    if (this.disastersEnabled) {
+      // 大地震（M6.8〜7.4）と中くらいの地震（M5.8〜6.6）
+      const since = this.year - (this.meta.lastQuakeYear ?? 0);
+      if (this.rand() < bigQuakeRate(since) / 360) this.earthquake(6.8 + this.rand() * 0.6);
+      else if (this.rand() < 0.04 / 360) this.earthquake(5.8 + this.rand() * 0.8);
+      this.igniteDay();
+    }
+    this.fireDay(day);
+    // がれきの撤去と、被災した建物の修理
+    const emergency = decreeActive(this.policies, 'emergency', day);
+    for (const r of [...this.rubble]) if (day >= r.clearDay - (emergency ? 20 : 0)) this.clearRubble(r.id, true);
+    for (const b of this.buildings.values()) {
+      if (b.damagedUntil && day >= b.damagedUntil - (emergency ? 45 : 0)) {
+        b.damagedUntil = 0;
+        spend(this.econ, buildingValue(b) * 0.05, 'other');
+        this.versions.buildings++;
+      }
+    }
+  }
+
+  private igniteDay(): void {
+    const water = this.services?.per;
+    for (const b of this.buildings.values()) {
+      let p = 0.00001 * (isWooden(b) ? 2.5 : 1) * (b.fireproof ? 0.4 : 1);
+      if (water && water.get(b.id)?.water === false) p *= 1.5;
+      if (this.rand() < p) this.startFire(b.id);
+    }
+  }
+
+  startFire(buildingId: number): void {
+    if (!this.buildings.has(buildingId) || this.fires.some((f) => f.building === buildingId)) return;
+    this.fires.push({ building: buildingId, start: this.day, intensity: 0.05, fought: false });
+    this.versions.fires++;
+    if (this.fires.length === 1) {
+      const b = this.buildings.get(buildingId)!;
+      const where = this.districts.at(b)?.name;
+      this.say(`${where ? where + 'で' : ''}${KINDS[b.kind].name}から出火`, 'bad');
+    }
+  }
+
+  private fireDay(day: number): void {
+    if (!this.fires.length) return;
+    const svc = this.services?.per;
+    const emergency = decreeActive(this.policies, 'emergency', day);
+    // 消防署ごとの消防車の数だけ、同時に消火できる
+    const trucks = new Map<number, number>();
+    for (const f of this.facilities.values()) if (FACILITIES[f.kind].cat === 'fire') trucks.set(f.id, FACILITIES[f.kind].capacity ?? 1);
+    const center = (f: Facility) => ({ x: f.x + f.nx * f.d * 4, z: f.z + f.nz * f.d * 4 });
+    const grid = new Map<string, Building[]>();
+    const G = 32;
+    for (const b of this.buildings.values()) {
+      const k = `${Math.floor(b.x / G)},${Math.floor(b.z / G)}`;
+      const l = grid.get(k);
+      if (l) l.push(b); else grid.set(k, [b]);
+    }
+    const spread: number[] = [];
+    let destroyed = 0, out = 0;
+    for (const fire of [...this.fires]) {
+      const b = this.buildings.get(fire.building);
+      if (!b) { this.fires = this.fires.filter((x) => x !== fire); continue; }
+      const bx = b.x + b.nx * b.d * 4, bz = b.z + b.nz * b.d * 4;
+      let station: Facility | null = null, bestD = Infinity;
+      for (const f of this.facilities.values()) {
+        const def = FACILITIES[f.kind];
+        if (def.cat !== 'fire' || (trucks.get(f.id) ?? 0) <= 0) continue;
+        const c = center(f);
+        const d = Math.hypot(c.x - bx, c.z - bz);
+        if (d < (def.radius ?? 0) && d < bestD) { station = f; bestD = d; }
+      }
+      fire.fought = !!station;
+      if (station) {
+        trucks.set(station.id, trucks.get(station.id)! - 1);
+        const base = station.kind === 'fireStation' ? 0.55 : 0.3;
+        const hasWater = svc?.get(b.id)?.water !== false;
+        if (this.rand() < base * (hasWater ? 1 : 0.4) * (emergency ? 1.3 : 1)) {
+          this.fires = this.fires.filter((x) => x !== fire);
+          if (fire.intensity > 0.45) b.damagedUntil = day + 60;
+          out++;
+          continue;
+        }
+      }
+      fire.intensity += station ? 0.12 : 0.3;
+      if (fire.intensity >= 1) {
+        this.fires = this.fires.filter((x) => x !== fire);
+        this.destroyBuilding(b, day);
+        destroyed++;
+        continue;
+      }
+      if (fire.intensity > 0.35) {
+        const gx = Math.floor(b.x / G), gz = Math.floor(b.z / G);
+        for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++) {
+          for (const o of grid.get(`${gx + dx},${gz + dz}`) ?? []) {
+            if (o.id === b.id) continue;
+            const reach = (Math.max(b.w, b.d) + Math.max(o.w, o.d)) * 4 * 0.6 + 5;
+            const ox = o.x + o.nx * o.d * 4, oz = o.z + o.nz * o.d * 4;
+            if (Math.hypot(ox - bx, oz - bz) > reach) continue;
+            const hood = hasPolicy(this.policies, this.districts.at(o)?.id ?? 0, 'fireproof') ? 0.6 : 1;
+            if (this.rand() < 0.18 * (isWooden(o) ? 1.6 : 0.4) * (o.fireproof ? 0.3 : 1) * hood) spread.push(o.id);
+          }
+        }
+      }
+    }
+    for (const id of spread) this.startFire(id);
+    if (destroyed) this.say(`火災で ${destroyed} 棟が焼失しました`, 'bad');
+    if (out && !this.fires.length) this.say('火災は消し止められました', 'info');
+    this.versions.fires++;
+  }
+
+  /** 建物を失い、がれきにする */
+  private destroyBuilding(b: Building, day: number): void {
+    const emergency = decreeActive(this.policies, 'emergency', day);
+    const r: Rubble = {
+      id: this.nextRubbleId++, x: b.x, z: b.z, y: b.y, ax: b.ax, az: b.az, nx: b.nx, nz: b.nz, w: b.w, d: b.d,
+      cellPos: b.cellPos.slice(), clearDay: day + (emergency ? 25 : 45), seed: b.seed,
+    };
+    const keys = b.cells.slice();
+    this.removeBuilding(b.id);
+    for (const k of keys) { const c = this.cells.get(k); if (c) c.building = -r.id; }
+    this.rubble.push(r);
+    this.fires = this.fires.filter((f) => f.building !== b.id);
+    this.versions.fires++;
+  }
+
+  private clearRubble(id: number, charge: boolean): void {
+    const r = this.rubble.find((x) => x.id === id);
+    if (!r) return;
+    for (const c of this.cells.values()) if (c.building === -id) c.building = 0;
+    this.rubble = this.rubble.filter((x) => x !== r);
+    if (charge) spend(this.econ, 300, 'other');
+    this.versions.fires++;
+    this.versions.cells++;
+  }
+
+  /** 地震を起こす。震源を省くと、地図の中か近くのどこか */
+  earthquake(magnitude: number, epicenter?: P2): QuakeReport {
+    const day = this.day;
+    const epi = epicenter ?? { x: (this.rand() - 0.5) * 6000, z: (this.rand() - 0.5) * 6000 };
+    const report: QuakeReport = {
+      day, magnitude: Math.round(magnitude * 10) / 10, epicenter: epi, maxShindo: '0',
+      collapsed: 0, damaged: 0, fires: 0, evacuees: 0, injured: 0, liquefied: 0, plantsStopped: 0,
+    };
+    let maxI = intensityAt(this.terrain, magnitude, epi, 0, 0);
+    const fireStarts: number[] = [];
+    for (const b of [...this.buildings.values()]) {
+      const I = intensityAt(this.terrain, magnitude, epi, b.x, b.z);
+      maxI = Math.max(maxI, I);
+      const liqRaw = I > 5 ? liquefaction(this.terrain, b.x, b.z) : 0;
+      const liq = liqRaw > 0.4 ? liqRaw : 0;
+      if (liq) report.liquefied++;
+      const { collapse, damage } = quakeDamage(b, I, liq);
+      const r = this.rand();
+      if (r < collapse) {
+        report.collapsed++;
+        report.evacuees += b.residents;
+        report.injured += Math.round(b.residents * 0.12);
+        this.destroyBuilding(b, day);
+        continue;
+      }
+      if (r < collapse + damage) {
+        report.damaged++;
+        report.evacuees += Math.round(b.residents * 0.5);
+        report.injured += Math.round(b.residents * 0.02);
+        b.damagedUntil = day + 120;
+      }
+      if (this.rand() < quakeFireChance(b, I)) fireStarts.push(b.id);
+    }
+    for (const f of this.facilities.values()) {
+      const I = intensityAt(this.terrain, magnitude, epi, f.x, f.z);
+      if (I >= 5.5 && FACILITIES[f.kind].cat === 'power') {
+        f.downUntil = day + (I >= 6.5 ? 25 : 6);
+        report.plantsStopped++;
+      }
+    }
+    for (const id of fireStarts) this.startFire(id);
+    report.fires = fireStarts.length;
+    report.maxShindo = shindoLabel(maxI);
+    if (magnitude >= 6.8) this.meta.lastQuakeYear = this.year;
+    this.policies.lastDisasterDay = day;
+    this.quakes.push(report);
+    if (this.quakes.length > 20) this.quakes.shift();
+    const dmg = report.collapsed + report.damaged > 0 ? `全壊 ${report.collapsed} 棟、損傷 ${report.damaged} 棟` : '建物の被害はなし';
+    this.say(`【地震】マグニチュード ${report.magnitude}、最大震度 ${report.maxShindo}。${dmg}${report.fires ? `、火災 ${report.fires} 件` : ''}`, report.collapsed ? 'bad' : 'info');
+    if (report.plantsStopped) this.say(`揺れで発電所 ${report.plantsStopped} か所が停止。しばらく停電が続きます`, 'bad');
+    this.events.push({ type: 'quake', report });
+    this.versions.buildings++;
+    this.versions.facilities++;
+    this.refreshServices();
+    this.recount();
+    return report;
+  }
+
+  // ---------- 政策と布告 ----------
+  togglePolicy(districtId: number, id: PolicyId): boolean {
+    if (this.blockedReason()) return false;
+    const list = this.policies.districts[districtId] ?? [];
+    const on = !list.includes(id);
+    this.policies.districts[districtId] = on ? [...list, id] : list.filter((x) => x !== id);
+    const where = districtId ? this.districts.get(districtId)?.name ?? '地区' : '市全体';
+    this.say(`${where}で「${POLICIES[id].name}」を${on ? '始めました' : 'やめました'}`, 'politics');
+    this.versions.economy++;
+    return on;
+  }
+
+  /** 布告を出す（切り替え式はオン／オフ）。できなければ理由 */
+  decree(id: DecreeId): string | null {
+    const blocked = this.blockedReason();
+    if (blocked) return blocked;
+    const def = DECREES[id], p = this.policies, day = this.day;
+    if (def.kind === 'toggle') {
+      const on = p.decrees[id] !== true;
+      p.decrees[id] = on;
+      this.say(`${def.name}を${on ? '出しました' : '解除しました'}`, 'politics');
+      this.refreshServices();
+      this.versions.economy++;
+      return null;
+    }
+    if ((p.cooldowns[id] ?? 0) > day) return `次に出せるのは ${Math.ceil(((p.cooldowns[id] ?? 0) - day) / 30)} か月後です`;
+    if (id === 'emergency' && day - p.lastDisasterDay > 60) return '災害から 60 日以内でないと出せません';
+    if (def.cost) {
+      if (def.cost > this.econ.money) return `資金が足りません（必要 ${formatYen(def.cost)}）`;
+      spend(this.econ, def.cost, 'other');
+    }
+    p.decrees[id] = day + (def.duration ?? 0);
+    p.cooldowns[id] = day + (def.cooldown ?? 0);
+    if (id === 'festival') addModifier(this.politics, 'tradition', 8, day + 90, '祭り');
+    if (id === 'emergency') addModifier(this.politics, 'progress', -5, day + 60, '非常事態宣言');
+    this.say(id === 'festival' ? '市をあげての祭りが開かれ、にぎわっています' : `${def.name}を出しました`, 'politics');
+    this.versions.economy++;
+    this.recount();
+    return null;
+  }
+
+  /** 政策の月の費用 */
+  private policyCost(): number {
+    let cost = 0;
+    for (const [did, list] of Object.entries(this.policies.districts)) {
+      for (const id of list) {
+        const def = POLICIES[id];
+        cost += def.costFlat ?? 0;
+        if (def.costPerBuilding) {
+          for (const b of this.buildings.values()) {
+            if (b.seismic !== 'old') continue;
+            if (Number(did) === 0 || this.districts.at(b)?.id === Number(did)) cost += def.costPerBuilding;
+          }
+        }
+      }
+    }
+    return cost;
+  }
+
+  private policyMonth(_day: number): void {
+    // 耐震補助：旧耐震の建物を少しずつ改修する
+    let retrofit = 0;
+    for (const b of this.buildings.values()) {
+      if (b.seismic !== 'old') continue;
+      if (!hasPolicy(this.policies, this.districts.at(b)?.id ?? 0, 'seismicAid')) continue;
+      if (this.rand() < 0.03) { b.seismic = 'new'; retrofit++; }
+    }
+    if (retrofit >= 5) this.say(`耐震補助で ${retrofit} 棟の耐震改修が終わりました`, 'good');
+  }
+
+  /** 施設・政策・布告による派閥の支持の上乗せ */
+  private factionExtra(day: number): Partial<Record<FactionId, number>> {
+    const extra: Partial<Record<FactionId, number>> = { ...(this.services?.factionBonus ?? {}) };
+    const add = (id: FactionId, v: number) => { extra[id] = (extra[id] ?? 0) + v; };
+    const total = Math.max(1, this.buildings.size);
+    for (const [did, list] of Object.entries(this.policies.districts)) {
+      let share = 1;
+      if (Number(did) !== 0) {
+        let n = 0;
+        for (const b of this.buildings.values()) if (this.districts.at(b)?.id === Number(did)) n++;
+        share = n / total;
+      }
+      for (const id of list) for (const [f, v] of Object.entries(POLICIES[id].faction ?? {})) add(f as FactionId, (v as number) * Math.max(0.3, share));
+    }
+    if (decreeActive(this.policies, 'powerSaving', day)) add('business', -6);
+    if (decreeActive(this.policies, 'curfew', day)) add('progress', -15);
+    return extra;
+  }
+
   // ---------- 集計 ----------
   recount(): void {
     let population = 0, comJobs = 0, indJobs = 0, oldSeismic = 0;
+    const svc = this.services?.per;
     for (const b of this.buildings.values()) {
-      population += b.residents;
-      if (b.zone === 3 || b.zone === 4) comJobs += b.jobs;
-      else indJobs += b.jobs;
+      const hurt = b.damagedUntil && b.damagedUntil > this.day ? 0.5 : 1;
+      const dark = svc?.get(b.id)?.power === false ? 0.5 : 1;
+      population += Math.round(b.residents * hurt);
+      if (b.zone === 3 || b.zone === 4) comJobs += Math.round(b.jobs * hurt * dark);
+      else indJobs += Math.round(b.jobs * hurt * dark);
       if (b.seismic === 'old') oldSeismic++;
     }
     const jobs = comJobs + indJobs;
@@ -591,10 +1072,15 @@ export class City {
     const capacity = this.region.neighbors
       .filter((n) => n.connected)
       .reduce((s, n) => s + Math.max(0, neighborJobs(n) - neighborWorkers(n)) + neighborJobs(n) * 0.04, 0);
-    const pollution = this.pollution();
+    const pollution = this.services ? this.services.pollution : this.pollution();
     const unemployment = workers ? unemployed / workers : 0;
     const t = this.econ.taxes;
-    const happiness = clamp01(64 - unemployment * 160 - (t.res - DEFAULT_TAXES.res) * 2.5 - pollution * 40 - (this.econ.bankrupt ? 15 : 0));
+    const base = this.services ? this.services.happiness + 6 : 64 - pollution * 40;
+    const festival = decreeActive(this.policies, 'festival', this.day) ? 8 : 0;
+    const smoke = (this.policies.districts[0] ?? []).includes('noSmoking') ? 1 : 0;
+    const curfew = decreeActive(this.policies, 'curfew', this.day) ? -3 : 0;
+    const saving = decreeActive(this.policies, 'powerSaving', this.day) ? -2 : 0;
+    const happiness = clamp01(base - unemployment * 100 - (t.res - DEFAULT_TAXES.res) * 2.5 - (this.econ.bankrupt ? 15 : 0) + festival + smoke + curfew + saving);
     const connected = this.region.neighbors.some((n) => n.connected);
     this.stats = {
       population, comJobs, indJobs, buildings: this.buildings.size,
@@ -603,7 +1089,7 @@ export class City {
       oldSeismicShare: this.buildings.size ? oldSeismic / this.buildings.size : 0,
       demand: {
         res: clamp(45 + (jobs + Math.min(capacity, 400) - workers) * 0.35 - (t.res - 10) * 3 + (happiness - 55) * 0.4),
-        com: clamp(20 + (population * 0.18 - comJobs) * 0.9 - (t.biz - 10) * 3 - shortage * 0.15),
+        com: clamp(20 + (population * 0.18 - comJobs) * 0.9 - (t.biz - 10) * 3 - shortage * 0.15 - ((this.policies.districts[0] ?? []).includes('landscape') ? 3 : 0)),
         ind: clamp(25 + (population * 0.25 + (connected ? 120 : 0) - indJobs) * 0.7 - (t.biz - 10) * 3 - shortage * 0.15),
       },
     };
@@ -654,6 +1140,12 @@ export class City {
       region: structuredClone(this.region),
       news: this.news.slice(),
       meta: { ...this.meta },
+      facilities: [...this.facilities.values()].map((f) => ({ ...f })),
+      nextFacilityId: this.nextFacilityId,
+      fires: this.fires.map((f) => ({ ...f })),
+      rubble: this.rubble.map((r) => ({ ...r })),
+      policies: structuredClone(this.policies),
+      quakes: this.quakes.slice(),
     };
   }
 
@@ -670,7 +1162,15 @@ export class City {
     // P1 のデータには建築年がないので、1 年目の旧耐震として扱う
     this.buildings = new Map(data.buildings.map((b) => [b.id, { ...b, built: b.built ?? 1, seismic: b.seismic ?? 'old' }]));
     this.nextBuildingId = data.nextBuildingId;
+    this.facilities = new Map((data.facilities ?? []).map((f) => [f.id, { ...f }]));
+    this.nextFacilityId = data.nextFacilityId ?? 1;
+    this.rubble = (data.rubble ?? []).map((r) => ({ ...r }));
+    this.nextRubbleId = this.rubble.reduce((m, r) => Math.max(m, r.id), 0) + 1;
+    this.rehomeFacilities();
     this.rehomeBuildings();
+    this.fires = (data.fires ?? []).filter((f) => this.buildings.has(f.building)).map((f) => ({ ...f }));
+    if (data.policies) this.policies = structuredClone(data.policies);
+    this.quakes = (data.quakes ?? []).slice();
     this.districts.list = data.districts.list.map((d) => ({ ...d }));
     this.districts.decode(data.districts.grid);
     if (data.economy) this.econ = structuredClone(data.economy);
@@ -680,6 +1180,7 @@ export class City {
     if (data.meta) this.meta = { ...data.meta };
     this.day = Math.floor(day);
     updateConnections(this.region, this.net);
+    this.refreshServices();
     for (const k of Object.keys(this.versions) as (keyof typeof this.versions)[]) this.versions[k]++;
     this.recount();
     this.lastJobs = this.stats.comJobs + this.stats.indJobs;

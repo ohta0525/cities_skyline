@@ -6,6 +6,9 @@ import { DEFAULT_CAMERA } from './render/camera';
 import { SAVE_VERSION, deserialize, emptyCity, loadSave, serialize, storeSave, type SaveData } from './save/save';
 import { City } from './city/city';
 import { KINDS } from './city/buildings';
+import { CATEGORY_NAMES, FACILITIES } from './city/facilities';
+import { shakeAmplitude } from './render/effects';
+import type { QuakeReport } from './city/disasters';
 import { zoneDef } from './city/zones';
 import { CityView } from './render/cityView';
 import { Tools } from './ui/tools';
@@ -51,7 +54,7 @@ const world = new World3D(canvas, settings.quality, settings.miniature);
 city = new City(generateTerrain(1), 1);
 const view = new CityView(world, city);
 const tools = new Tools(world, city, view, canvas, { toast });
-const hall = new Panels(() => city, { toast });
+const hall = new Panels(() => city, { toast, setInfo: (m) => view.setInfo(m) });
 
 function startCity(save: SaveData): void {
   cityName = save.cityName;
@@ -60,6 +63,7 @@ function startCity(save: SaveData): void {
   terrain = generateTerrain(save.terrain.seed, save.terrain.preset);
   city = new City(terrain, save.terrain.seed);
   city.load(save.city, save.sim.day);
+  city.disastersEnabled = settings.disasters;
   world.setTerrain(terrain);
   view.setCity(city);
   tools.setCity(city);
@@ -246,6 +250,17 @@ mini.oninput = () => {
   saveSettings(settings);
 };
 
+$<HTMLInputElement>(settings.disasters ? 'disOn' : 'disOff').checked = true;
+document.querySelectorAll<HTMLInputElement>('input[name="disasters"]').forEach((r) => {
+  r.onchange = () => {
+    settings.disasters = r.value === 'on';
+    saveSettings(settings);
+    city.disastersEnabled = settings.disasters;
+  };
+});
+$('quakeMid').onclick = () => { closePanels(); city.earthquake(6.3, world.controls.target.clone()); };
+$('quakeBig').onclick = () => { closePanels(); city.earthquake(7.2, { x: world.controls.target.x + 800, z: world.controls.target.z + 300 }); };
+
 const btnNew = $<HTMLButtonElement>('btnNew');
 let armTimer: ReturnType<typeof setTimeout> | undefined;
 const disarm = () => { clearTimeout(armTimer); armTimer = undefined; btnNew.classList.remove('armed'); btnNew.textContent = '新しい街を始める'; };
@@ -275,14 +290,31 @@ function updateProbe(dt: number): void {
   probeAcc = 0;
   const el = $('probe');
   if (!pointer) return;
-  const bid = view.pickBuilding(pointer.x, pointer.y, canvas);
-  const b = bid ? city.buildings.get(bid) : undefined;
+  const picked = view.pick(pointer.x, pointer.y, canvas);
+  const fac = picked?.kind === 'facility' ? city.facilities.get(picked.id) : undefined;
+  if (fac) {
+    const def = FACILITIES[fac.kind];
+    const down = fac.downUntil > city.day ? '<span class="kind">停止中</span>' : '';
+    el.innerHTML = `${def.name}<span class="kind">${CATEGORY_NAMES[def.cat]}</span>${down}　維持費 月 ${formatYen(def.upkeep)}${def.radius ? `　範囲 ${def.radius} m` : ''}`;
+    return;
+  }
+  const b = picked?.kind === 'building' ? city.buildings.get(picked.id) : undefined;
   if (b) {
     const def = KINDS[b.kind];
     const floors = b.floors > 1 ? `　${b.floors}階建て` : '';
     const people = [b.residents ? `住民 <b>${b.residents}</b> 人` : '', b.jobs ? `雇用 <b>${b.jobs}</b> 人` : ''].filter(Boolean).join('　');
     const district = city.districts.at(b)?.name;
-    el.innerHTML = `${def.name}${floors}<span class="kind">${zoneDef(b.zone)!.name}</span>　${people}${district ? `<span class="kind">${district}</span>` : ''}`;
+    const sv = city.services?.per.get(b.id);
+    const lacks = sv ? (['power', 'water', 'sewage', 'garbage'] as const).filter((k) => !sv[k]).map((k) => ({ power: '電気', water: '水道', sewage: '下水', garbage: 'ゴミ収集' })[k]) : [];
+    const tags = [
+      b.seismic === 'old' ? '旧耐震' : '新耐震',
+      b.fireproof ? '防火構造' : '',
+      b.damagedUntil && b.damagedUntil > city.day ? '被災・修理待ち' : '',
+      city.fires.some((f) => f.building === b.id) ? '火災' : '',
+      lacks.length ? `${lacks.join('・')}なし` : '',
+      sv ? `満足度 ${Math.round(sv.happiness)}` : '',
+    ].filter(Boolean).map((t) => `<span class="kind">${t}</span>`).join('');
+    el.innerHTML = `${def.name}${floors}<span class="kind">${zoneDef(b.zone)!.name}</span>　${people}${district ? `<span class="kind">${district}</span>` : ''}${tags}`;
     return;
   }
   const hit = world.pick(pointer.x, pointer.y);
@@ -321,6 +353,7 @@ let pledgeShown = false;
 function checkPolitics(): void {
   const ev = city.events.shift();
   if (ev?.type === 'election') showElection(ev.result);
+  if (ev?.type === 'quake') showQuake(ev.report);
   const p = city.politics;
   if (p.pledgeChoiceOpen && !pledgeShown && $('modal').hidden) {
     pledgeShown = true;
@@ -339,6 +372,24 @@ function checkPolitics(): void {
       [{ label: 'あとで決める（政治パネルからも選べます）' }]);
   }
   if (!p.pledgeChoiceOpen) pledgeShown = false;
+}
+
+function showQuake(q: QuakeReport): void {
+  world.shake(shakeAmplitude(q.maxShindo), 5);
+  const serious = q.collapsed + q.damaged + q.fires > 0;
+  if (!serious) { toast(`地震がありました（M${q.magnitude}、最大震度 ${q.maxShindo}）。被害はありません`); return; }
+  const t = document.createElement('table');
+  t.className = 'ledger';
+  const rows: [string, string][] = [
+    ['全壊（がれきに）', `${q.collapsed} 棟`], ['損傷（修理待ち）', `${q.damaged} 棟`], ['火災', `${q.fires} 件`],
+    ['液状化した場所の建物', `${q.liquefied} 棟`], ['止まった発電所', `${q.plantsStopped} か所`],
+    ['避難している人', `${q.evacuees.toLocaleString()} 人`], ['けが人', `${q.injured.toLocaleString()} 人`],
+  ];
+  t.innerHTML = rows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('');
+  setTimeout(() => showModal(`地震発生：マグニチュード ${q.magnitude}、最大震度 ${q.maxShindo}`, [
+    para('被害の状況がまとまりました。'), t,
+    para('がれきは 45 日ほどで片付き、損傷した建物は修理されます。「政策」から非常事態宣言を出すと、復旧が速くなります。消防署が近くにない地域では火が広がりやすくなります。', 'note'),
+  ], [{ label: '政策を開く', onClick: () => hall.toggle('policy', true) }, { label: '閉じる', primary: true }]), 3500);
 }
 
 function showElection(r: ElectionResult): void {
@@ -389,6 +440,7 @@ function frame(now: number): void {
   const dt = Math.min(0.1, (now - last) / 1000);
   last = now;
   view.sync(sim.day);
+  view.update(now / 1000);
   hall.update();
   checkPolitics();
   world.render(dt);

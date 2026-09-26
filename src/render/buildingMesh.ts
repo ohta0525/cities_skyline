@@ -12,7 +12,7 @@ export const WIN = { none: 0, house: 1, apartment: 2, office: 3, factory: 4, sho
 type V = THREE.Vector3;
 const v = (x: number, y: number, z: number) => new THREE.Vector3(x, y, z);
 
-class B {
+export class B {
   pos: number[] = [];
   nrm: number[] = [];
   col: number[] = [];
@@ -138,8 +138,8 @@ class B {
   }
 }
 
-const pick = <T>(r: () => number, arr: T[]): T => arr[Math.floor(r() * arr.length)];
-const range = (r: () => number, a: number, b: number) => a + (b - a) * r();
+export const pick = <T>(r: () => number, arr: T[]): T => arr[Math.floor(r() * arr.length)];
+export const range = (r: () => number, a: number, b: number) => a + (b - a) * r();
 
 const WALLS = ['#f3f0e6', '#e8dfcc', '#dcd6ca', '#cdbba0', '#bfc8cc', '#e6d6bd', '#d9cfc0'];
 const ROOFS = ['#4a4f58', '#34465e', '#6d4a37', '#56655a', '#7e4538', '#3f4a52'];
@@ -148,7 +148,7 @@ const BLOCK = '#b4afa5';
 const CONCRETE = '#bab6ad';
 
 /** 敷地の地面（造成した面）と基礎 */
-function lotPad(g: B, W: number, D: number, color: string): void {
+export function lotPad(g: B, W: number, D: number, color: string): void {
   g.box(-W / 2 + 0.2, W / 2 - 0.2, -3, 0.06, 0.2, D - 0.2, CONCRETE, 0, color);
 }
 

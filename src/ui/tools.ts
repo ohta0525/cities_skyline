@@ -4,13 +4,14 @@ import { dist2, type P2 } from '../city/geometry';
 import { ROAD_TYPES, type RoadPlan, type RoadType, type Snap } from '../city/roads';
 import { ZONES, type ZoneId } from '../city/zones';
 import { formatYen } from '../city/economy';
+import { CATEGORY_NAMES, FACILITIES, facilitiesIn, type FacilityCategory, type FacilityKind } from '../city/facilities';
 import type { CityView } from '../render/cityView';
 import { ring } from '../render/overlays';
 import { buildRoadGhost } from '../render/roadMesh';
 import type { World3D } from '../render/world3d';
 import { heightAt } from '../world/terrain';
 
-export type ToolId = 'none' | 'road' | 'zone' | 'district' | 'bulldoze';
+export type ToolId = 'none' | 'road' | 'zone' | 'district' | 'facility' | 'bulldoze';
 
 const BRUSHES = [{ r: 12, label: '小' }, { r: 28, label: '中' }, { r: 56, label: '大' }];
 
@@ -28,6 +29,8 @@ export class Tools {
   brush = 28;
   districtId = 0;
   districtErase = false;
+  facilityCat: FacilityCategory = 'power';
+  facilityKind: FacilityKind = 'solar';
 
   private start: Snap | null = null;
   private control: P2 | null = null;
@@ -36,7 +39,11 @@ export class Tools {
   private painting = false;
   private shift = false;
   private rightDown: { x: number; y: number } | null = null;
-  private bulldozeTarget: { building?: number; segment?: number } | null = null;
+  private bulldozeTarget: { building?: number; facility?: number; segment?: number } | null = null;
+  private facilityGhost = new THREE.Mesh(
+    new THREE.BoxGeometry(1, 1, 1),
+    new THREE.MeshBasicMaterial({ color: '#4fc3ff', transparent: true, opacity: 0.4, depthTest: false }),
+  );
 
   private ghost = new THREE.Mesh(
     new THREE.BufferGeometry(),
@@ -50,7 +57,9 @@ export class Tools {
   constructor(private world: World3D, private city: City, private view: CityView, private canvas: HTMLCanvasElement, private ui: Ui) {
     this.ghost.renderOrder = 12;
     this.ghost.visible = false;
-    world.scene.add(this.ghost, this.brushRing, this.snapRing);
+    this.facilityGhost.renderOrder = 12;
+    this.facilityGhost.visible = false;
+    world.scene.add(this.ghost, this.brushRing, this.snapRing, this.facilityGhost);
 
     canvas.addEventListener('pointerdown', this.onDown);
     canvas.addEventListener('pointermove', this.onMove);
@@ -109,6 +118,7 @@ export class Tools {
     if (this.tool === 'road' && hit) this.clickRoad(hit.point);
     else if ((this.tool === 'zone' || this.tool === 'district') && hit) { this.painting = true; this.paint(hit.point); }
     else if (this.tool === 'bulldoze') this.bulldoze();
+    else if (this.tool === 'facility' && hit) this.placeFacility(hit.point);
   };
 
   private onMove = (e: PointerEvent) => {
@@ -131,6 +141,7 @@ export class Tools {
   /** カーソルの位置に合わせて、見本や吸着の表示を更新する */
   refresh(): void {
     this.ghost.visible = false;
+    this.facilityGhost.visible = false;
     this.brushRing.visible = false;
     this.snapRing.visible = false;
     this.tip.hidden = true;
@@ -138,9 +149,10 @@ export class Tools {
     const hit = this.world.pick(this.pointer.x, this.pointer.y);
 
     if (this.tool === 'bulldoze') {
-      const b = this.view.pickBuilding(this.pointer.x, this.pointer.y, this.canvas);
-      let target: { building?: number; segment?: number } | null = null;
-      if (b) target = { building: b };
+      const b = this.view.pick(this.pointer.x, this.pointer.y, this.canvas);
+      let target: { building?: number; facility?: number; segment?: number } | null = null;
+      if (b?.kind === 'building') target = { building: b.id };
+      else if (b?.kind === 'facility') target = { facility: b.id };
       else if (hit) {
         const s = this.city.net.segmentAt({ x: hit.point.x, z: hit.point.z });
         if (s) target = { segment: s.seg.id };
@@ -148,11 +160,31 @@ export class Tools {
       this.bulldozeTarget = target;
       this.view.highlight(target);
       if (target?.building) this.showTip(this.city.buildings.get(target.building) ? 'クリックで建物を取り壊す' : '');
+      else if (target?.facility) {
+        const f = this.city.facilities.get(target.facility);
+        if (f) this.showTip(`クリックで${FACILITIES[f.kind].name}を撤去（建設費の半分が戻る）`);
+      }
       else if (target?.segment) this.showTip('クリックで道路を撤去');
       return;
     }
     if (!hit) return;
     const p = { x: hit.point.x, z: hit.point.z };
+
+    if (this.tool === 'facility') {
+      const plan = this.city.planFacility(p, this.facilityKind);
+      const def = FACILITIES[this.facilityKind];
+      const W = def.w * 8, D = def.d * 8, H = 8;
+      const g = this.facilityGhost;
+      g.scale.set(W - 1, H, D - 1);
+      const X = new THREE.Vector3(plan.ax, 0, plan.az), Z = new THREE.Vector3(plan.nx, 0, plan.nz);
+      if (new THREE.Vector3().crossVectors(X, new THREE.Vector3(0, 1, 0)).dot(Z) < 0) X.negate();
+      g.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(X, new THREE.Vector3(0, 1, 0), Z));
+      g.position.set(plan.x, plan.y + H / 2, plan.z).addScaledVector(Z, D / 2);
+      g.visible = plan.cells.length > 0;
+      (g.material as THREE.MeshBasicMaterial).color.set(plan.ok ? '#4fc3ff' : '#ff5a4a');
+      this.showTip(plan.ok ? `${def.name}　${formatYen(def.cost)}（維持費 月 ${formatYen(def.upkeep)}）` : plan.reason ?? '置けません', !plan.ok);
+      return;
+    }
 
     if (this.tool === 'zone' || this.tool === 'district') {
       this.brushRing.visible = true;
@@ -268,10 +300,19 @@ export class Tools {
     this.city.paintDistrict(p, this.brush, this.districtId);
   }
 
+  private placeFacility(point: THREE.Vector3): void {
+    const plan = this.city.planFacility({ x: point.x, z: point.z }, this.facilityKind);
+    if (!plan.ok) { this.ui.toast(plan.reason ?? 'ここには置けません'); return; }
+    this.city.placeFacility(plan);
+    this.ui.toast(`${FACILITIES[plan.kind].name}を建てました`);
+    this.refresh();
+  }
+
   private bulldoze(): void {
     const t = this.bulldozeTarget;
     if (!t) return;
     if (t.building) this.city.removeBuilding(t.building);
+    else if (t.facility) this.city.removeFacility(t.facility);
     else if (t.segment) this.city.removeRoad(t.segment);
     this.bulldozeTarget = null;
     this.view.highlight(null);
@@ -371,10 +412,30 @@ export class Tools {
         btn(g2, '削除', false, () => { this.city.removeDistrict(cur.id); this.districtId = 0; this.renderSubbar(); });
       }
       brushes();
+    } else if (this.tool === 'facility') {
+      const g1 = group('分類');
+      for (const cat of Object.keys(CATEGORY_NAMES) as FacilityCategory[]) {
+        btn(g1, CATEGORY_NAMES[cat], this.facilityCat === cat, () => {
+          this.facilityCat = cat;
+          this.facilityKind = facilitiesIn(cat)[0];
+          this.renderSubbar();
+        });
+      }
+      const g2 = group('施設');
+      for (const k of facilitiesIn(this.facilityCat)) {
+        const def = FACILITIES[k];
+        const b = btn(g2, `${def.name}（${formatYen(def.cost)}）`, this.facilityKind === k, () => { this.facilityKind = k; this.renderSubbar(); this.refresh(); });
+        b.title = def.note;
+        if (def.unlockYear && this.city.year < def.unlockYear) b.disabled = true;
+      }
+      const hint = document.createElement('span');
+      hint.className = 'hint';
+      hint.textContent = FACILITIES[this.facilityKind].note;
+      el.append(hint);
     } else if (this.tool === 'bulldoze') {
       const hint = document.createElement('span');
       hint.className = 'hint';
-      hint.textContent = '建物か道路をクリックすると取り壊します';
+      hint.textContent = '建物・施設・道路をクリックすると取り壊します';
       el.append(hint);
     }
   }

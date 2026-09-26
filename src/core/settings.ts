@@ -8,11 +8,12 @@ export interface Settings {
   /** ミニチュア効果（周辺のぼかし）の強さ 0〜1 */
   miniature: number;
   helpSeen: boolean;
+  disasters: boolean;
 }
 
 const KEY = 'mizuho-city/settings';
 
-export const DEFAULT_SETTINGS: Settings = { yearMinutes: 15, quality: 'high', miniature: 0.6, helpSeen: false };
+export const DEFAULT_SETTINGS: Settings = { yearMinutes: 15, quality: 'high', miniature: 0.6, helpSeen: false, disasters: true };
 
 export function loadSettings(): Settings {
   try {
@@ -24,6 +25,7 @@ export function loadSettings(): Settings {
       quality: o.quality === 'medium' || o.quality === 'low' ? o.quality : 'high',
       miniature: typeof o.miniature === 'number' ? Math.min(1, Math.max(0, o.miniature)) : DEFAULT_SETTINGS.miniature,
       helpSeen: o.helpSeen === true,
+      disasters: o.disasters !== false,
     };
   } catch {
     return { ...DEFAULT_SETTINGS };
