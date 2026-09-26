@@ -71,7 +71,13 @@ export function buildTrees(t: Terrain, density: number): THREE.Group {
   ] as const) {
     if (!list.length) continue;
     const inst = new THREE.InstancedMesh(geo, mat, list.length);
-    list.forEach((mm, i) => { inst.setMatrixAt(i, mm); inst.setColorAt(i, colors[i]); });
+    const xz = new Float32Array(list.length * 2);
+    list.forEach((mm, i) => {
+      inst.setMatrixAt(i, mm);
+      inst.setColorAt(i, colors[i]);
+      xz[i * 2] = mm.elements[12]; xz[i * 2 + 1] = mm.elements[14];
+    });
+    inst.userData.xz = xz;
     inst.castShadow = true;
     inst.receiveShadow = true;
     inst.computeBoundingSphere();
@@ -79,4 +85,25 @@ export function buildTrees(t: Terrain, density: number): THREE.Group {
   }
   g.userData.count = conifers.length + broads.length;
   return g;
+}
+
+const HIDDEN = new THREE.Matrix4().makeScale(0, 0, 0);
+
+/** 範囲の中で test が真になる木を消す（道路や建物の場所） */
+export function clearTrees(group: THREE.Group, box: { minX: number; maxX: number; minZ: number; maxZ: number }, test: (x: number, z: number) => boolean): void {
+  for (const child of group.children) {
+    const inst = child as THREE.InstancedMesh;
+    const xz = inst.userData.xz as Float32Array | undefined;
+    if (!xz) continue;
+    let changed = false;
+    for (let i = 0; i < inst.count; i++) {
+      const x = xz[i * 2], z = xz[i * 2 + 1];
+      if (x < box.minX || x > box.maxX || z < box.minZ || z > box.maxZ) continue;
+      if (!test(x, z)) continue;
+      inst.setMatrixAt(i, HIDDEN);
+      xz[i * 2] = 1e9;
+      changed = true;
+    }
+    if (changed) inst.instanceMatrix.needsUpdate = true;
+  }
 }

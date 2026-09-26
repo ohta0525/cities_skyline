@@ -11,8 +11,8 @@ import type { Quality } from '../core/settings';
 import { BASE_Y, SEA_LEVEL, heightAt, insideMap, type Terrain } from '../world/terrain';
 import { CameraController } from './camera';
 import { buildDiorama, buildNameplate } from './diorama';
-import { buildTerrainMesh } from './terrainMesh';
-import { buildTrees } from './trees';
+import { buildTerrainMesh, updateTerrainRegion } from './terrainMesh';
+import { buildTrees, clearTrees } from './trees';
 import { buildRiver, buildSea, createWaterMaterial } from './water';
 
 const BG = new THREE.Color('#c8d5d3');
@@ -34,6 +34,10 @@ export class World3D {
   readonly controls: CameraController;
   private terrain!: Terrain;
   private worldGroup = new THREE.Group();
+  private terrainMesh?: THREE.Mesh;
+  private trees?: THREE.Group;
+  /** 地形を作り直すたびに増える（街の表示側が木を消し直すため） */
+  terrainEpoch = 0;
   private sun = new THREE.DirectionalLight('#fff0d8', 3.1);
   private water = createWaterMaterial();
   private composer!: EffectComposer;
@@ -83,12 +87,23 @@ export class World3D {
     this.terrain = t;
     this.disposeGroup(this.worldGroup);
     this.worldGroup.clear();
-    this.worldGroup.add(buildTerrainMesh(t));
+    this.terrainMesh = buildTerrainMesh(t);
+    this.worldGroup.add(this.terrainMesh);
     this.worldGroup.add(buildSea(t, this.water.material));
     const river = buildRiver(t, this.water.material);
     if (river) this.worldGroup.add(river);
     this.worldGroup.add(buildDiorama(t, this.water.material));
-    this.worldGroup.add(buildTrees(t, QUALITY[this.quality].trees));
+    this.trees = buildTrees(t, QUALITY[this.quality].trees);
+    this.worldGroup.add(this.trees);
+    this.terrainEpoch++;
+  }
+
+  updateTerrain(r: { i0: number; i1: number; j0: number; j1: number }): void {
+    if (this.terrainMesh) updateTerrainRegion(this.terrainMesh, this.terrain, r);
+  }
+
+  clearTrees(box: { minX: number; maxX: number; minZ: number; maxZ: number }, test: (x: number, z: number) => boolean): void {
+    if (this.trees) clearTrees(this.trees, box, test);
   }
 
   setCityName(text: string): void {

@@ -20,6 +20,16 @@
       <span id="season" class="season">春</span>
       <span id="date" class="date">復興暦 1年 4月 1日</span>
     </div>
+    <div class="stats">
+      <div class="stat"><span class="k">人口</span><span class="v" id="pop">0</span></div>
+      <div class="stat"><span class="k">雇用</span><span class="v" id="jobs">0</span></div>
+      <div class="stat"><span class="k">建物</span><span class="v" id="bcount">0</span></div>
+      <div class="demand" title="需要（住宅・商業・工業）">
+        <div class="bar"><i id="dRes" style="background:#3cb878"></i><b>住</b></div>
+        <div class="bar"><i id="dCom" style="background:#e6475a"></i><b>商</b></div>
+        <div class="bar"><i id="dInd" style="background:#5fa8e6"></i><b>工</b></div>
+      </div>
+    </div>
     <div class="speed" role="group" aria-label="速度">
       <button id="sp0" data-speed="0" title="一時停止（Space）">❚❚</button>
       <button id="sp1" data-speed="1" title="標準">▶</button>
@@ -83,9 +93,29 @@
       <dt>Home</dt><dd>初期位置に戻る</dd>
       <dt>Space</dt><dd>一時停止 ／ 再開</dd>
       <dt>1 ／ 2 ／ 3</dt><dd>速度（標準 ／ 2 倍 ／ 4 倍）</dd>
+      <dt>Esc</dt><dd>置きかけの道路をやめる ／ 道具を外す</dd>
     </dl>
-    <p class="note">P0 は地形と見た目の基盤です。道路と区画は P1 で追加します。</p>
+    <h2 class="sub">街のつくり方</h2>
+    <ol class="steps">
+      <li>「道路」で道路を引きます。クリックで始点、もう一度クリックで終点。続けて引けます</li>
+      <li>「区画」で用途地域を選び、道路沿いのマスをドラッグで塗ります</li>
+      <li>需要（画面上の 住・商・工 のバー）に応じて、建物が建っていきます</li>
+      <li>「地区」で町を塗り分けると、町名が付きます</li>
+    </ol>
   </aside>
+
+  <div id="labels" class="labels" aria-hidden="true"></div>
+  <div id="tip" class="tip" hidden></div>
+
+  <nav class="dock" aria-label="道具">
+    <div id="subbar" class="subbar" hidden></div>
+    <div class="tools" role="toolbar">
+      <button data-tool="road" aria-pressed="false"><i class="ico road"></i>道路</button>
+      <button data-tool="zone" aria-pressed="false"><i class="ico zone"></i>区画</button>
+      <button data-tool="district" aria-pressed="false"><i class="ico district"></i>地区</button>
+      <button data-tool="bulldoze" aria-pressed="false"><i class="ico bulldoze"></i>撤去</button>
+    </div>
+  </nav>
 
   <footer class="statusbar">
     <div class="probe" id="probe">地形にカーソルを合わせると、標高と地形が表示されます</div>

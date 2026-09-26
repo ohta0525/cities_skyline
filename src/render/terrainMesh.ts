@@ -95,3 +95,22 @@ function terrainColor(t: Terrain, i: number, j: number, h: number, out: THREE.Co
   out.lerp(COL.snow, smoothstep(205, 222, h));
   out.multiplyScalar(0.96 + r * 0.08);
 }
+
+/** 地形を書き換えた範囲だけ、頂点の高さと色を更新する */
+export function updateTerrainRegion(mesh: THREE.Mesh, t: Terrain, r: { i0: number; i1: number; j0: number; j1: number }): void {
+  const pos = mesh.geometry.getAttribute('position') as THREE.BufferAttribute;
+  const col = mesh.geometry.getAttribute('color') as THREE.BufferAttribute;
+  const c = new THREE.Color();
+  for (let j = Math.max(0, r.j0 - 1); j <= Math.min(GRID, r.j1 + 1); j++) {
+    for (let i = Math.max(0, r.i0 - 1); i <= Math.min(GRID, r.i1 + 1); i++) {
+      const k = j * N + i;
+      const h = t.heights[k];
+      pos.setY(k, h);
+      terrainColor(t, i, j, h, c);
+      col.setXYZ(k, c.r, c.g, c.b);
+    }
+  }
+  pos.needsUpdate = true;
+  col.needsUpdate = true;
+  mesh.geometry.computeBoundingSphere();
+}

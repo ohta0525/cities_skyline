@@ -3,7 +3,13 @@ import { randomSeed } from './core/rng';
 import { loadSettings, saveSettings, type Quality, type Settings } from './core/settings';
 import { World3D } from './render/world3d';
 import { DEFAULT_CAMERA } from './render/camera';
-import { SAVE_VERSION, deserialize, loadSave, serialize, storeSave, type SaveData } from './save/save';
+import { SAVE_VERSION, deserialize, emptyCity, loadSave, serialize, storeSave, type SaveData } from './save/save';
+import { City } from './city/city';
+import { KINDS } from './city/buildings';
+import { zoneDef } from './city/zones';
+import { CityView } from './render/cityView';
+import { Tools } from './ui/tools';
+import * as THREE from 'three';
 import { MONTH_DAYS, YEAR_DAYS, dateOf, formatDate, seasonOf, type Speed, type YearMinutes } from './sim/clock';
 import type { FromWorker, SimState, ToWorker } from './sim/protocol';
 import { generateTerrain, heightAt, landKind, type Terrain } from './world/terrain';
@@ -16,6 +22,7 @@ let speed: Speed = 1;
 let sim: SimState = { day: 0 };
 let cityName = '新市';
 let terrain: Terrain;
+let city: City;
 
 // ---------- シミュレーション（別スレッド） ----------
 const worker = new Worker(new URL('./sim/worker.ts', import.meta.url), { type: 'module' });
@@ -24,7 +31,9 @@ let lastMonth = -1;
 worker.onmessage = (e: MessageEvent<FromWorker>) => {
   if (e.data.type !== 'tick') return;
   sim = e.data.state;
+  city?.advanceTo(sim.day);
   updateClock();
+  updateStats();
   // 月が変わるたびに自動保存
   const month = Math.floor(sim.day / MONTH_DAYS);
   if (lastMonth >= 0 && month !== lastMonth) storeSave('auto', snapshot());
@@ -34,20 +43,27 @@ worker.onmessage = (e: MessageEvent<FromWorker>) => {
 // ---------- 3D ----------
 const canvas = $<HTMLCanvasElement>('view');
 const world = new World3D(canvas, settings.quality, settings.miniature);
+city = new City(generateTerrain(1), 1);
+const view = new CityView(world, city);
+const tools = new Tools(world, city, view, canvas, { toast });
 
 function startCity(save: SaveData): void {
   cityName = save.cityName;
   $<HTMLInputElement>('cityName').value = cityName;
-  if (!terrain || terrain.seed !== save.terrain.seed) {
-    terrain = generateTerrain(save.terrain.seed, save.terrain.preset);
-    world.setTerrain(terrain);
-  }
+  // 道路の造成で地形が変わっているので、毎回生成し直してから街を載せる
+  terrain = generateTerrain(save.terrain.seed, save.terrain.preset);
+  city = new City(terrain, save.terrain.seed);
+  city.load(save.city, save.sim.day);
+  world.setTerrain(terrain);
+  view.setCity(city);
+  tools.setCity(city);
   world.setCityName(`瑞穂連邦　${cityName}　／　河川平野と海岸`);
   world.controls.setState(save.camera);
   sim = { ...save.sim };
   lastMonth = Math.floor(sim.day / MONTH_DAYS);
   send({ type: 'init', state: sim, yearMinutes: settings.yearMinutes, speed });
   updateClock();
+  updateStats();
 }
 
 function freshCity(): SaveData {
@@ -58,6 +74,7 @@ function freshCity(): SaveData {
     terrain: { seed: randomSeed(), preset: 'river-coast' },
     sim: { day: 0 },
     camera: { ...DEFAULT_CAMERA },
+    city: emptyCity(),
   };
 }
 
@@ -69,6 +86,7 @@ function snapshot(): SaveData {
     terrain: { seed: terrain.seed, preset: terrain.preset },
     sim: { ...sim },
     camera: world.controls.getState(),
+    city: city.toJSON(),
   };
 }
 
@@ -80,6 +98,19 @@ function updateClock(): void {
   const el = $('season');
   el.textContent = s;
   el.dataset.s = s;
+}
+
+function updateStats(): void {
+  const st = city.stats;
+  $('pop').textContent = st.population.toLocaleString();
+  $('jobs').textContent = (st.comJobs + st.indJobs).toLocaleString();
+  $('bcount').textContent = st.buildings.toLocaleString();
+  for (const [id, v] of [['dRes', st.demand.res], ['dCom', st.demand.com], ['dInd', st.demand.ind]] as const) {
+    const el = $(id);
+    el.style.height = `${Math.abs(v) / 2}%`;
+    el.style.bottom = v >= 0 ? '50%' : `${50 - Math.abs(v) / 2}%`;
+    el.style.opacity = v >= 0 ? '1' : '0.45';
+  }
 }
 
 function setSpeed(s: Speed): void {
@@ -227,12 +258,52 @@ function updateProbe(dt: number): void {
   if (probeAcc < 0.08) return;
   probeAcc = 0;
   const el = $('probe');
-  const hit = pointer && world.pick(pointer.x, pointer.y);
+  if (!pointer) return;
+  const bid = view.pickBuilding(pointer.x, pointer.y, canvas);
+  const b = bid ? city.buildings.get(bid) : undefined;
+  if (b) {
+    const def = KINDS[b.kind];
+    const floors = b.floors > 1 ? `　${b.floors}階建て` : '';
+    const people = [b.residents ? `住民 <b>${b.residents}</b> 人` : '', b.jobs ? `雇用 <b>${b.jobs}</b> 人` : ''].filter(Boolean).join('　');
+    const district = city.districts.at(b)?.name;
+    el.innerHTML = `${def.name}${floors}<span class="kind">${zoneDef(b.zone)!.name}</span>　${people}${district ? `<span class="kind">${district}</span>` : ''}`;
+    return;
+  }
+  const hit = world.pick(pointer.x, pointer.y);
   if (!hit) return;
   const h = heightAt(terrain, hit.point.x, hit.point.z);
   const kind = landKind(terrain, hit.point.x, hit.point.z);
   const label = h < 0 ? `水深 <b>${(-h).toFixed(1)}</b> m` : `標高 <b>${h.toFixed(1)}</b> m`;
-  el.innerHTML = `${label}<span class="kind">${kind}</span>`;
+  const district = city.districts.at({ x: hit.point.x, z: hit.point.z })?.name;
+  el.innerHTML = `${label}<span class="kind">${kind}</span>${district ? `<span class="kind">${district}</span>` : ''}`;
+}
+
+// ---------- 地区の名前ラベル ----------
+const labelsEl = $('labels');
+const labelEls = new Map<number, HTMLSpanElement>();
+let labelsVersion = -1;
+let centroids = new Map<number, { x: number; z: number }>();
+const tmp = new THREE.Vector3();
+function updateLabels(): void {
+  if (city.versions.districts !== labelsVersion) {
+    labelsVersion = city.versions.districts;
+    centroids = city.districts.centroids();
+    for (const [id, el] of labelEls) if (!centroids.has(id)) { el.remove(); labelEls.delete(id); }
+    for (const d of city.districts.list) {
+      if (!centroids.has(d.id)) continue;
+      let el = labelEls.get(d.id);
+      if (!el) { el = document.createElement('span'); labelsEl.append(el); labelEls.set(d.id, el); }
+      el.textContent = d.name;
+    }
+  }
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  for (const [id, el] of labelEls) {
+    const c = centroids.get(id)!;
+    tmp.set(c.x, Math.max(0, heightAt(terrain, c.x, c.z)) + 25, c.z).project(world.camera);
+    const visible = tmp.z < 1 && Math.abs(tmp.x) < 1.1 && Math.abs(tmp.y) < 1.1;
+    el.hidden = !visible;
+    if (visible) el.style.transform = `translate(${((tmp.x + 1) / 2) * w}px, ${((1 - tmp.y) / 2) * h}px) translate(-50%, -50%)`;
+  }
 }
 
 // ---------- ループ ----------
@@ -241,8 +312,10 @@ let last = performance.now();
 function frame(now: number): void {
   const dt = Math.min(0.1, (now - last) / 1000);
   last = now;
+  view.sync(sim.day);
   world.render(dt);
   updateProbe(dt);
+  updateLabels();
   $('needle').setAttribute('transform', `rotate(${(world.heading() * 180) / Math.PI} 20 20)`);
   requestAnimationFrame(frame);
 }
@@ -260,4 +333,4 @@ requestAnimationFrame(() => {
 });
 
 // 開発時だけ、ブラウザのコンソールから触れるようにする
-if (import.meta.env.DEV) Object.assign(window, { __world: world });
+if (import.meta.env.DEV) Object.assign(window, { __world: world, __app: { get city() { return city; }, tools, view } });

@@ -7,7 +7,7 @@ import { mulberry32 } from '../core/rng';
  * プリセット「河川平野＋海岸」：北に山、中央に平野、川が南の湾に注ぐ。
  */
 export const MAP_SIZE = 2048;
-export const GRID = 256;
+export const GRID = 512;
 export const CELL = MAP_SIZE / GRID;
 export const HALF = MAP_SIZE / 2;
 export const SEA_LEVEL = 0;
@@ -140,6 +140,18 @@ export function generateTerrain(seed: number, preset: TerrainPreset = 'river-coa
   return { seed, preset, heights, forest, riverDist, river, coastZ };
 }
 
+/** 地形メッシュと同じ三角形分割で補間する（道路や建物がメッシュとずれないように） */
+function sampleTri(arr: Float32Array, x: number, z: number): number {
+  const gx = Math.min(GRID - 1e-6, Math.max(0, (x + HALF) / CELL));
+  const gz = Math.min(GRID - 1e-6, Math.max(0, (z + HALF) / CELL));
+  const i = Math.floor(gx), j = Math.floor(gz);
+  const fx = gx - i, fz = gz - j;
+  const a = arr[j * N + i], c = arr[j * N + i + 1];
+  const b = arr[(j + 1) * N + i], d = arr[(j + 1) * N + i + 1];
+  if (fx + fz <= 1) return a + (c - a) * fx + (b - a) * fz;
+  return d + (b - d) * (1 - fx) + (c - d) * (1 - fz);
+}
+
 function sampleGrid(arr: Float32Array, x: number, z: number): number {
   const gx = Math.min(GRID - 1e-6, Math.max(0, (x + HALF) / CELL));
   const gz = Math.min(GRID - 1e-6, Math.max(0, (z + HALF) / CELL));
@@ -152,7 +164,7 @@ function sampleGrid(arr: Float32Array, x: number, z: number): number {
 
 /** 任意の地点の標高（双線形補間） */
 export function heightAt(t: Terrain, x: number, z: number): number {
-  return sampleGrid(t.heights, x, z);
+  return sampleTri(t.heights, x, z);
 }
 
 export function riverDistAt(t: Terrain, x: number, z: number): number {
@@ -181,4 +193,21 @@ export function landKind(t: Terrain, x: number, z: number): string {
   if (h > 120) return '山地';
   if (h > 30) return '丘陵';
   return forestAt(t, x, z) > 0.5 ? '森' : '平野';
+}
+
+/** その地点が水面（海・川）なら水面の高さ、陸なら null */
+export function waterLevelAt(t: Terrain, x: number, z: number): number | null {
+  if (!insideMap(x, z)) return null;
+  const h = heightAt(t, x, z);
+  if (h < SEA_LEVEL + 0.2) return SEA_LEVEL;
+  const v = (z + HALF) / MAP_SIZE;
+  const k = Math.min(t.river.length - 1, Math.max(0, Math.round(v * RIVER_STEPS)));
+  const p = t.river[k];
+  if (sampleGrid(t.riverDist, x, z) < p.width / 2 + 1 && h < p.level + 0.5) return p.level;
+  return null;
+}
+
+/** 地形を書き換えたあと、標高の配列を差し替える（道路の造成など） */
+export function setGridHeight(t: Terrain, i: number, j: number, h: number): void {
+  t.heights[j * N + i] = h;
 }
