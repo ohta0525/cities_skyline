@@ -275,3 +275,15 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
 .npc .perk.on { color: #8fdc8a; }
 .npc .request { background: rgba(242, 177, 52, .12); border: 1px solid rgba(242, 177, 52, .5); border-radius: 8px; padding: 8px 10px; margin: 8px 0; font-size: 13px; line-height: 1.6; }
 .npc .row button, .cityhall .row button { background: var(--raised); border: 1px solid var(--line); border-radius: 6px; padding: 4px 10px; cursor: pointer; font-size: 13px; }
+
+.ico.defense { background: linear-gradient(#7fae5a 0 45%, #b9b6ae 45% 70%, #4f93b8 70%); border-radius: 3px; }
+.alertbar {
+  position: absolute; top: 122px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 12px;
+  max-width: min(760px, calc(100% - 32px)); padding: 8px 12px; border-radius: 10px;
+  background: rgba(24, 18, 26, .92); border: 1px solid #8a3fb0; color: #fff;
+}
+.alertbar .lv { flex: 0 0 auto; display: grid; place-items: center; width: 34px; height: 34px; border-radius: 6px; font-family: var(--num); font-weight: 700; font-size: 18px; }
+.alertbar .alert-text { display: flex; flex-direction: column; gap: 2px; font-size: 13px; line-height: 1.4; }
+.alertbar .alert-text span { color: #d9d0e0; font-size: 12px; }
+.alertbar button { flex: 0 0 auto; background: #e0413a; color: #fff; border: 0; border-radius: 8px; padding: 8px 14px; font-weight: 700; cursor: pointer; }
+.alertbar button.on { background: var(--raised); border: 1px solid var(--line); }

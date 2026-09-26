@@ -86,6 +86,9 @@
       <div class="row">
         <button id="quakeMid">地震を起こす（M6.3）</button>
         <button id="quakeBig">大地震を起こす（M7.2）</button>
+        <button id="stormTest">強い台風を起こす</button>
+        <button id="rainTest">大雨を起こす</button>
+        <button id="tsunamiTest">海で大地震（津波）</button>
       </div>
     </fieldset>
     <fieldset>
@@ -119,11 +122,17 @@
       <li>「施設」で発電所や浄水場を建て、道路でつなぐと電気と水道が届きます。消防署・交番・病院・学校も必要です</li>
       <li>「公共交通」で停留所や駅を順にクリックして Enter で路線ができます。「交通」で一方通行・右折レーン・立体交差・踏切の高架化ができます</li>
       <li>左の「関係者」で私鉄社長や建設会社社長と関係を深めると見返りがあります（疑惑度に注意）</li>
+      <li>台風や大雨の予報が出たら、上の警報の帯から「避難指示」を出せます。「防災」で堤防・防潮堤を高くし、「施設」の防災から避難タワーや仮設住宅を建てます</li>
       <li>4 年ごとに市長選挙があります。「政治」で派閥の支持を見ながら、公約を掲げて再選を目指します</li>
     </ol>
   </aside>
 
   <button id="ticker" class="ticker" title="新聞を開く"><b>地元紙</b><span id="tickerText"></span></button>
+  <div id="alert" class="alertbar" hidden>
+    <span id="alertLevel" class="lv">3</span>
+    <div class="alert-text"><b id="alertTitle"></b><span id="alertDetail"></span></div>
+    <button id="btnEvac">避難指示を出す</button>
+  </div>
 
   <nav class="rail" aria-label="市役所">
     <button data-panel="finance" aria-pressed="false">財政</button>
@@ -133,6 +142,7 @@
     <button data-panel="transport" aria-pressed="false">交通</button>
     <button data-panel="npc" aria-pressed="false">関係者<i id="npcBadge" class="badge" hidden></i></button>
     <button data-panel="policy" aria-pressed="false">政策</button>
+    <button data-panel="disaster" aria-pressed="false">防災<i id="disasterBadge" class="badge" hidden></i></button>
     <button data-panel="info" aria-pressed="false">情報</button>
     <button data-panel="news" aria-pressed="false">新聞<i id="newsBadge" class="badge" hidden></i></button>
   </nav>
@@ -157,6 +167,7 @@
       <button data-tool="facility" aria-pressed="false"><i class="ico facility"></i>施設</button>
       <button data-tool="traffic" aria-pressed="false"><i class="ico traffic"></i>交通</button>
       <button data-tool="transit" aria-pressed="false"><i class="ico transit"></i>公共交通</button>
+      <button data-tool="defense" aria-pressed="false"><i class="ico defense"></i>防災</button>
       <button data-tool="district" aria-pressed="false"><i class="ico district"></i>地区</button>
       <button data-tool="bulldoze" aria-pressed="false"><i class="ico bulldoze"></i>撤去</button>
     </div>

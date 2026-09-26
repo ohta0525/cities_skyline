@@ -9,6 +9,8 @@ import { KINDS } from './city/buildings';
 import { CATEGORY_NAMES, FACILITIES } from './city/facilities';
 import { shakeAmplitude } from './render/effects';
 import type { QuakeReport } from './city/disasters';
+import type { DisasterReport } from './city/city';
+import { ALERT_COLORS, ALERT_NAMES, alertLevel } from './city/water';
 import { zoneDef } from './city/zones';
 import { CityView } from './render/cityView';
 import { Tools } from './ui/tools';
@@ -260,6 +262,9 @@ document.querySelectorAll<HTMLInputElement>('input[name="disasters"]').forEach((
 });
 $('quakeMid').onclick = () => { closePanels(); city.earthquake(6.3, world.controls.target.clone()); };
 $('quakeBig').onclick = () => { closePanels(); city.earthquake(7.2, { x: world.controls.target.x + 800, z: world.controls.target.z + 300 }); };
+$('stormTest').onclick = () => { closePanels(); city.spawnStorm('typhoon', 0.85); toast('強い台風が発生しました。上の警報を見て避難指示を判断してください'); };
+$('rainTest').onclick = () => { closePanels(); city.spawnStorm('rain', 0.7); toast('大雨の予報が出ました'); };
+$('tsunamiTest').onclick = () => { closePanels(); city.earthquake(8.1, { x: 0, z: 4000 }); };
 
 const btnNew = $<HTMLButtonElement>('btnNew');
 let armTimer: ReturnType<typeof setTimeout> | undefined;
@@ -354,6 +359,8 @@ function checkPolitics(): void {
   const ev = city.events.shift();
   if (ev?.type === 'election') showElection(ev.result);
   if (ev?.type === 'quake') showQuake(ev.report);
+  if (ev?.type === 'disaster') showDisaster(ev.report);
+  updateAlert();
   const p = city.politics;
   if (p.pledgeChoiceOpen && !pledgeShown && $('modal').hidden) {
     pledgeShown = true;
@@ -374,9 +381,55 @@ function checkPolitics(): void {
   if (!p.pledgeChoiceOpen) pledgeShown = false;
 }
 
+function updateAlert(): void {
+  const st = city.activeStorm();
+  const el = $('alert');
+  el.hidden = !st;
+  if (!st) return;
+  const lv = alertLevel(st, city.day);
+  const chip = $('alertLevel');
+  chip.textContent = String(lv);
+  chip.style.background = ALERT_COLORS[lv];
+  chip.style.color = lv <= 2 ? '#1b1b1b' : '#fff';
+  $('alertTitle').textContent = `${st.name}　警戒レベル ${lv}：${ALERT_NAMES[lv]}`;
+  const f = st.forecast;
+  const days = st.hit - city.day;
+  const when = days > 0 ? `${days} 日後に最も強まる見込み` : '最も強まっています';
+  const surge = f.surge[1] > 0.2 ? `、高潮 ${f.surge[0].toFixed(1)}〜${f.surge[1].toFixed(1)} m` : '';
+  $('alertDetail').textContent = `${when}。予報：川の水位 ${f.rise[0].toFixed(1)}〜${f.rise[1].toFixed(1)} m 上昇${surge}`;
+  const btn = $('btnEvac');
+  btn.textContent = st.evacuated ? '避難指示を解除' : '避難指示を出す';
+  btn.classList.toggle('on', st.evacuated);
+}
+$('btnEvac').onclick = () => {
+  const st = city.activeStorm();
+  const r = city.evacuate(!st?.evacuated);
+  if (r) toast(r);
+};
+
+function showDisaster(r: DisasterReport): void {
+  const t = document.createElement('table');
+  t.className = 'ledger';
+  const rows: [string, string][] = r.kind === 'nuclear'
+    ? [['避難した人', `${r.displaced.toLocaleString()} 人`]]
+    : [
+        ['堤防を越えた川の区間', `${r.breaches}`], ['床上浸水', `${r.above} 棟`], ['床下浸水', `${r.below} 棟`], ['全壊・流失', `${r.collapsed} 棟`],
+        ['土砂災害', `${r.landslides} 棟`], ['風の被害', `${r.damaged} 棟`], ['逃げ遅れて救助された人', `${r.stranded.toLocaleString()} 人`],
+        ['住まいを失った人', `${r.displaced.toLocaleString()} 人`], ['国などからの支援', formatYen(r.aid)],
+      ];
+  t.innerHTML = rows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('');
+  const lesson = r.stranded > 0
+    ? '避難指示が遅れた（または出さなかった）ため、逃げ遅れた人がいました。次は予報を見て早めに判断しましょう。'
+    : r.evacuated ? '早めの避難で、逃げ遅れた人はいませんでした。' : '';
+  showModal(r.title, [t, para(r.note || lesson, 'note'), para('「防災」パネルで、仮設住宅や防衛隊の災害派遣、区画整理・高台移転などの復興を進められます。', 'note')],
+    [{ label: '防災パネルを開く', onClick: () => hall.toggle('disaster', true) }, { label: '閉じる', primary: true }]);
+}
+
 function showQuake(q: QuakeReport): void {
   world.shake(shakeAmplitude(q.maxShindo), 5);
   const serious = q.collapsed + q.damaged + q.fires > 0;
+  // 津波の報告が続くときは、そちらのダイアログを優先する
+  if (city.events.some((e) => e.type === 'disaster')) { toast(`地震（M${q.magnitude}、最大震度 ${q.maxShindo}）。津波が発生しました`); return; }
   if (!serious) { toast(`地震がありました（M${q.magnitude}、最大震度 ${q.maxShindo}）。被害はありません`); return; }
   const t = document.createElement('table');
   t.className = 'ledger';
@@ -441,6 +494,7 @@ function frame(now: number): void {
   last = now;
   view.sync(sim.day);
   view.update(now / 1000, speed === 0 ? 0 : dt * Math.min(speed, 3));
+  world.setWeather(view.weather);
   hall.update();
   checkPolitics();
   world.render(dt);

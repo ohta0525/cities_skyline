@@ -1,9 +1,9 @@
 import type { FactionId } from './politics';
 
-export type FacilityCategory = 'power' | 'water' | 'garbage' | 'fire' | 'police' | 'health' | 'education' | 'leisure' | 'transport';
+export type FacilityCategory = 'power' | 'water' | 'garbage' | 'fire' | 'police' | 'health' | 'education' | 'leisure' | 'transport' | 'disaster';
 
 export const CATEGORY_NAMES: Record<FacilityCategory, string> = {
-  power: '電気', water: '上下水道', garbage: 'ゴミ', fire: '消防', police: '警察', health: '医療', education: '教育', leisure: '公園・文化', transport: '交通',
+  power: '電気', water: '上下水道', garbage: 'ゴミ', fire: '消防', police: '警察', health: '医療', education: '教育', leisure: '公園・文化', transport: '交通', disaster: '防災',
 };
 
 export type FacilityKind =
@@ -15,7 +15,8 @@ export type FacilityKind =
   | 'clinic' | 'hospital'
   | 'elementary' | 'highschool'
   | 'park' | 'shrine'
-  | 'parkRide';
+  | 'parkRide'
+  | 'retention' | 'discharge' | 'sabo' | 'evacTower' | 'disasterPark' | 'tempHousing' | 'garrison';
 
 export interface FacilityDef {
   name: string;
@@ -46,6 +47,10 @@ export interface FacilityDef {
   /** 周りへの公害の半径 */
   pollution?: number;
   faction?: { id: FactionId; amount: number };
+  /** 避難所として受け入れられる人数 */
+  shelter?: number;
+  /** 仮設住宅に住める人数 */
+  housing?: number;
   note: string;
 }
 
@@ -62,9 +67,16 @@ export const FACILITIES: Record<FacilityKind, FacilityDef> = {
   policeStation: { name: '警察署', cat: 'police', w: 2, d: 2, cost: 7_000, upkeep: 250, radius: 750, note: '広い範囲の治安を守る' },
   clinic: { name: '診療所', cat: 'health', w: 1, d: 2, cost: 2_500, upkeep: 80, radius: 400, note: '町のお医者さん' },
   hospital: { name: '総合病院', cat: 'health', w: 3, d: 3, cost: 30_000, upkeep: 900, radius: 1_100, note: '救急にも対応する' },
-  elementary: { name: '小学校', cat: 'education', w: 2, d: 3, cost: 9_000, upkeep: 250, radius: 600, faction: { id: 'progress', amount: 1 }, note: '校庭つき。災害時は避難所になる' },
-  highschool: { name: '高校', cat: 'education', w: 3, d: 3, cost: 18_000, upkeep: 450, radius: 1_000, faction: { id: 'progress', amount: 2 }, note: '広い範囲の子どもが通う' },
+  elementary: { name: '小学校', cat: 'education', w: 2, d: 3, cost: 9_000, upkeep: 250, radius: 600, shelter: 600, faction: { id: 'progress', amount: 1 }, note: '校庭つき。災害時は避難所になる' },
+  highschool: { name: '高校', cat: 'education', w: 3, d: 3, cost: 18_000, upkeep: 450, radius: 1_000, shelter: 1_000, faction: { id: 'progress', amount: 2 }, note: '広い範囲の子どもが通う' },
   park: { name: '公園', cat: 'leisure', w: 1, d: 1, cost: 300, upkeep: 10, radius: 160, happiness: 6, note: '周りの満足度が上がる' },
+  retention: { name: '遊水地', cat: 'disaster', w: 3, d: 4, cost: 30_000, upkeep: 100, needsWater: true, note: '大雨のとき川の水をためて、下流の水位の上昇を 0.7 m 抑える（3 か所まで効く）' },
+  discharge: { name: '地下放水路', cat: 'disaster', w: 3, d: 3, cost: 500_000, upkeep: 1_500, note: '地下の巨大な水路で川の水を逃がす。市全体で水位の上昇を 1.5 m 抑える' },
+  sabo: { name: '砂防ダム', cat: 'disaster', w: 2, d: 2, cost: 12_000, upkeep: 40, radius: 320, note: '近く（320 m）の土砂災害を 8 割減らす' },
+  evacTower: { name: '津波避難タワー', cat: 'disaster', w: 1, d: 1, cost: 4_000, upkeep: 20, radius: 400, shelter: 500, note: '近く（400 m）の人が津波から逃げ込める' },
+  disasterPark: { name: '防災公園', cat: 'disaster', w: 2, d: 3, cost: 3_000, upkeep: 60, radius: 200, happiness: 5, shelter: 1_500, note: '災害時は避難所になり、火の燃え広がりも防ぐ' },
+  tempHousing: { name: '仮設住宅', cat: 'disaster', w: 2, d: 2, cost: 2_500, upkeep: 50, housing: 200, note: '家を失った人が住める（200 人）' },
+  garrison: { name: '防衛隊駐屯地', cat: 'disaster', w: 4, d: 4, cost: 150_000, upkeep: 1_500, faction: { id: 'defense', amount: 8 }, note: '災害派遣を要請できる。救助とがれきの片付けが速くなる' },
   parkRide: { name: '駐車場（パークアンドライド）', cat: 'transport', w: 2, d: 2, cost: 1_200, upkeep: 30, radius: 250, note: '近く（250 m）の駅まで車で来て電車に乗り換えられる。駅を使える範囲が 1.6 倍に' },
   shrine: { name: '神社', cat: 'leisure', w: 1, d: 2, cost: 1_500, upkeep: 20, radius: 260, happiness: 4, faction: { id: 'tradition', amount: 3 }, note: '鎮守の森。保守・伝統派が喜ぶ' },
 };

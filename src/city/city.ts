@@ -13,6 +13,11 @@ import {
 } from './transit';
 import { ACTIONS, NPCS, REQUESTS, newConnections, type ActionId, type ConnectionsState, type NpcId } from './connections';
 import type { NodeControl } from './roads';
+import {
+  ALERT_NAMES, LEVEE_COST, bankProtection, effectiveRise, LEVEE_MAX, SEAWALL_COST, SEAWALL_HEIGHTS, alertLevel, coastDistance, coastSection, coastalDepth,
+  floodDamage, landslideChance, makeStorm, newDefenses, riverFloodDepth, riverSection, type Defenses, type Storm, type StormKind,
+} from './water';
+import { floodDepth as hazardFlood } from './hazard';
 import { heightAt, waterLevelAt } from '../world/terrain';
 import { Districts, type District } from './districts';
 import {
@@ -91,9 +96,39 @@ export interface CityData {
   rubble?: Rubble[];
   policies?: PolicyState;
   quakes?: QuakeReport[];
+  defenses?: Defenses;
+  storms?: Storm[];
+  disasterReports?: DisasterReport[];
+  displaced?: number;
+  restricted?: Restricted[];
+  stormNo?: number;
   transit?: { stops: Stop[]; tracks: import('./transit').Track[]; lines: Line[]; nextId: number };
   connections?: ConnectionsState;
 }
+
+export interface DisasterReport {
+  day: number;
+  kind: 'typhoon' | 'rain' | 'tsunami' | 'nuclear';
+  title: string;
+  /** 浸水（床下・床上）、全壊、損傷、土砂災害、逃げ遅れ（救助された人）、家を失った人 */
+  below: number;
+  above: number;
+  collapsed: number;
+  damaged: number;
+  landslides: number;
+  stranded: number;
+  displaced: number;
+  breaches: number;
+  evacuated: boolean;
+  aid: number;
+  note: string;
+}
+
+/** 立ち入りが制限された区域（原発事故） */
+export interface Restricted { x: number; z: number; r: number; until: number }
+
+/** 水が引くまで表示する浸水の範囲 */
+export interface FloodView { day: number; until: number; wave: number; rise: number; kind: 'river' | 'coast' }
 
 export const NODE_CONTROL_COST: Record<NodeControl, number> = { auto: 0, turnlane: 300, grade: 50_000 };
 export const NODE_CONTROL_NAMES: Record<NodeControl, string> = { auto: '信号', turnlane: '右折レーン付き信号', grade: '立体交差' };
@@ -134,17 +169,25 @@ export class City {
   riders: Ridership | null = null;
   crossings: Crossing[] = [];
   connections: ConnectionsState = newConnections();
+  defenses: Defenses = newDefenses();
+  storms: Storm[] = [];
+  disasterReports: DisasterReport[] = [];
+  displaced = 0;
+  restricted: Restricted[] = [];
+  flood: FloodView | null = null;
+  private stormNo = 0;
+  private dispatchUntil = 0;
   private trafficDirty = true;
   private nextFacilityId = 1;
   private nextRubbleId = 1;
   day = 0;
   stats: CityStats = { ...EMPTY_STATS };
   /** 変更のたびに増える番号。描画側はこれを見て作り直す */
-  versions = { roads: 0, cells: 0, buildings: 0, districts: 0, economy: 0, news: 0, facilities: 0, fires: 0, services: 0, transit: 0, traffic: 0 };
+  versions = { roads: 0, cells: 0, buildings: 0, districts: 0, economy: 0, news: 0, facilities: 0, fires: 0, services: 0, transit: 0, traffic: 0, water: 0 };
   /** 地形を変えた範囲（描画側が取り出して反映する） */
   terrainChanges: GridRange[] = [];
   /** 画面に知らせたい出来事（選挙結果など）。描画側が取り出す */
-  events: ({ type: 'election'; result: ElectionResult } | { type: 'quake'; report: QuakeReport })[] = [];
+  events: ({ type: 'election'; result: ElectionResult } | { type: 'quake'; report: QuakeReport } | { type: 'disaster'; report: DisasterReport })[] = [];
   private nextBuildingId = 1;
   private rand: () => number;
   private lastJobs = 0;
@@ -323,7 +366,7 @@ export class City {
     for (const c of this.cells.values()) {
       if (Math.abs(c.x - center.x) > radius || Math.abs(c.z - center.z) > radius) continue;
       if (Math.hypot(c.x - center.x, c.z - center.z) > radius) continue;
-      if (c.zone === zone || (onlyEmpty && c.zone) || c.facility) continue;
+      if (c.zone === zone || (onlyEmpty && c.zone) || c.facility || (zone && this.isRestricted(c))) continue;
       if (c.building > 0) this.removeBuilding(c.building);
       c.zone = zone;
       changed++;
@@ -356,6 +399,7 @@ export class City {
       this.day = d;
       this.growDay(d);
       this.disasterDay(d);
+      this.stormDay(d);
       if (this.trafficDirty && d % 3 === 0) this.refreshTraffic();
       if (d % 30 === 0) this.monthly(d);
       if (d % 360 === 0) this.yearly(d);
@@ -371,7 +415,7 @@ export class City {
     for (const [group, demand] of groups) {
       if (demand <= 0) continue;
       const zones = new Set(ZONES.filter((z) => z.group === group).map((z) => z.id as number));
-      const fronts = [...this.cells.values()].filter((c) => c.depth === 0 && !c.building && !c.facility && zones.has(c.zone));
+      const fronts = [...this.cells.values()].filter((c) => c.depth === 0 && !c.building && !c.facility && zones.has(c.zone) && !this.isRestricted(c));
       if (!fronts.length) continue;
       const attempts = Math.ceil(demand / 30);
       for (let a = 0; a < attempts; a++) {
@@ -559,6 +603,7 @@ export class City {
       transitCost: transitMoney.cost,
     });
     this.connectionsMonth(day);
+    this.waterMonth(day);
     if (!wasBankrupt && this.econ.bankrupt) this.say('財政再生団体に転落しました。新しい道路は作れず、税率も下げられません', 'bad');
     if (wasBankrupt && !this.econ.bankrupt) this.say('財政再生団体から脱しました', 'good');
 
@@ -814,7 +859,7 @@ export class City {
     this.fireDay(day);
     // がれきの撤去と、被災した建物の修理
     const emergency = decreeActive(this.policies, 'emergency', day);
-    const fast = this.connections.rel.builder >= 70 ? 22 : 0;
+    const fast = (this.connections.rel.builder >= 70 ? 22 : 0) + (day < this.dispatchUntil ? 25 : 0) + (this.hasFacility('garrison') ? 5 : 0);
     for (const r of [...this.rubble]) if (day >= r.clearDay - (emergency ? 20 : 0) - fast) this.clearRubble(r.id, true);
     for (const b of this.buildings.values()) {
       if (b.damagedUntil && day >= b.damagedUntil - (emergency ? 45 : 0)) {
@@ -980,6 +1025,11 @@ export class City {
     }
     for (const id of fireStarts) this.startFire(id);
     report.fires = fireStarts.length;
+    this.displaced += report.evacuees;
+    this.nuclearCheck(magnitude, epi, 0);
+    // 海で起きた大きな地震は津波を起こす
+    const inSea = coastDistance(this.terrain, Math.max(-1000, Math.min(1000, epi.x)), Math.max(-1000, Math.min(1000, epi.z))) < -150 || epi.z > 1024;
+    if (inSea && magnitude >= 7) this.tsunami(Math.round(((magnitude - 6.8) * 6 + this.rand() * 2) * 10) / 10);
     report.maxShindo = shindoLabel(maxI);
     if (magnitude >= 6.8) this.meta.lastQuakeYear = this.year;
     this.policies.lastDisasterDay = day;
@@ -1420,6 +1470,379 @@ export class City {
     }
   }
 
+
+  // ---------- 水害と防災 ----------
+  isRestricted(p: P2): boolean {
+    return this.restricted.some((r) => r.until > this.day && Math.hypot(r.x - p.x, r.z - p.z) < r.r);
+  }
+
+  hasFacility(kind: FacilityKind): boolean {
+    for (const f of this.facilities.values()) if (f.kind === kind) return true;
+    return false;
+  }
+
+  private countFacility(kind: FacilityKind): number {
+    let n = 0;
+    for (const f of this.facilities.values()) if (f.kind === kind) n++;
+    return n;
+  }
+
+  /** 川岸をクリックして堤防を 1 段高くする */
+  planLevee(p: P2): { ok: boolean; reason?: string; sec: number; cost: number; level: number } {
+    const k = Math.min(this.terrain.river.length - 1, Math.max(0, Math.round(((p.z + 1024) / 2048) * 512)));
+    const rp = this.terrain.river[k];
+    const sec = riverSection(p.z);
+    const level = this.defenses.levees[sec] ?? 0;
+    const cost = Math.round(LEVEE_COST * this.buildDiscount());
+    if (Math.hypot(rp.x - p.x, rp.z - p.z) > rp.width / 2 + 90 || rp.level <= 0.01) return { ok: false, reason: '川岸の近く（海より上流）をクリックしてください', sec, cost, level };
+    if (level >= LEVEE_MAX) return { ok: false, reason: 'この区間の堤防はこれ以上高くできません', sec, cost, level };
+    const blocked = this.blockedReason();
+    if (blocked) return { ok: false, reason: blocked, sec, cost, level };
+    if (cost > this.econ.money) return { ok: false, reason: `資金が足りません（必要 ${formatYen(cost)}）`, sec, cost, level };
+    return { ok: true, sec, cost, level };
+  }
+
+  buildLevee(p: P2): string | null {
+    const plan = this.planLevee(p);
+    if (!plan.ok) return plan.reason ?? '造れません';
+    spend(this.econ, plan.cost);
+    this.defenses.levees[plan.sec] = plan.level + 1;
+    this.versions.water++;
+    return null;
+  }
+
+  planSeawall(p: P2): { ok: boolean; reason?: string; sec: number; cost: number; level: number } {
+    const sec = coastSection(p.x);
+    const level = this.defenses.seawalls[sec] ?? 0;
+    const cost = Math.round((SEAWALL_COST[level + 1] ?? 0) * this.buildDiscount());
+    if (Math.abs(coastDistance(this.terrain, p.x, p.z)) > 140) return { ok: false, reason: '海岸線の近くをクリックしてください', sec, cost, level };
+    if (level >= SEAWALL_HEIGHTS.length - 1) return { ok: false, reason: 'この区間の防潮堤はこれ以上高くできません', sec, cost, level };
+    const blocked = this.blockedReason();
+    if (blocked) return { ok: false, reason: blocked, sec, cost, level };
+    if (cost > this.econ.money) return { ok: false, reason: `資金が足りません（必要 ${formatYen(cost)}）`, sec, cost, level };
+    return { ok: true, sec, cost, level };
+  }
+
+  buildSeawall(p: P2): string | null {
+    const plan = this.planSeawall(p);
+    if (!plan.ok) return plan.reason ?? '造れません';
+    spend(this.econ, plan.cost);
+    this.defenses.seawalls[plan.sec] = plan.level + 1;
+    this.versions.water++;
+    return null;
+  }
+
+  /** いま来ている（予報が出ている）嵐 */
+  activeStorm(): Storm | null {
+    return this.storms.find((s) => !s.done) ?? null;
+  }
+
+  /** 嵐を起こす（テストや設定からも使う） */
+  spawnStorm(kind: StormKind, strength?: number): Storm {
+    if (kind === 'typhoon') this.stormNo++;
+    const st = makeStorm(kind, this.transit.nextId++, this.day, this.stormNo, this.rand, strength);
+    this.storms.push(st);
+    if (this.storms.length > 30) this.storms.shift();
+    const lv = alertLevel(st, this.day);
+    this.say(`【気象】${st.name}の予報。${st.hit - this.day} 日後に最も強まる見込み（警戒レベル ${lv}：${ALERT_NAMES[lv]}）`, 'bad');
+    this.versions.water++;
+    return st;
+  }
+
+  /** 避難指示を出す（もう一度で解除） */
+  evacuate(on = true): string | null {
+    const st = this.activeStorm();
+    if (!st) return '今は避難指示を出す必要のある災害はありません';
+    if (this.politics.mayor !== 'player') return this.blockedReason();
+    st.evacuated = on;
+    st.evacDay = this.day;
+    this.say(on ? `市が全域に避難指示（警戒レベル 4）を出しました。避難所 ${this.shelterCapacity().toLocaleString()} 人分を開設` : '避難指示を解除しました', 'politics');
+    this.versions.water++;
+    return null;
+  }
+
+  shelterCapacity(): number {
+    let n = 0;
+    for (const f of this.facilities.values()) n += FACILITIES[f.kind].shelter ?? 0;
+    return n;
+  }
+
+  private stormDay(day: number): void {
+    for (const st of this.storms) {
+      if (st.done) continue;
+      if (st.evacuated && day < st.end) {
+        // 避難中は店や工場が止まる
+        spend(this.econ, (this.stats.comJobs + this.stats.indJobs) * 0.15, 'other');
+      }
+      if (day === st.hit) this.applyStorm(st);
+      if (day >= st.end) {
+        st.done = true;
+        if (st.evacuated) this.say('避難指示を解除しました', 'politics');
+        this.versions.water++;
+      }
+      const lv = alertLevel(st, day);
+      if (day === st.hit - 1 && !st.evacuated) this.say(`【警戒レベル ${lv}】${st.name}が明日最も強まります。${ALERT_NAMES[lv]}`, 'bad');
+    }
+  }
+
+  /** 嵐がいちばん強まった日の被害 */
+  private applyStorm(st: Storm): void {
+    const a = st.actual, day = this.day;
+    const retention = this.countFacility('retention'), discharge = this.countFacility('discharge');
+    const sabo = [...this.facilities.values()].filter((f) => f.kind === 'sabo');
+    const sewage = this.services?.util.sewage.served ?? 0;
+    const rain = Math.min(1, a.rise / 7);
+    const r: DisasterReport = {
+      day, kind: st.kind, title: `${st.name}の被害`, below: 0, above: 0, collapsed: 0, damaged: 0, landslides: 0,
+      stranded: 0, displaced: 0, breaches: 0, evacuated: st.evacuated, aid: 0, note: '',
+    };
+    for (let sec = 0; sec < this.defenses.levees.length; sec++) {
+      const zc = sec * 160 - 1024 + 80;
+      const k = Math.min(this.terrain.river.length - 1, Math.max(0, Math.round(((zc + 1024) / 2048) * 512)));
+      if (this.terrain.river[k].level <= 0.01) continue;
+      if (effectiveRise(a.rise, zc, retention, discharge) > bankProtection(this.defenses, sec)) r.breaches++;
+    }
+    let exposed = 0;
+    for (const b of [...this.buildings.values()]) {
+      const cx = b.x + b.nx * b.d * 4, cz = b.z + b.nz * b.d * 4;
+      let depth = Math.max(
+        riverFloodDepth(this.terrain, this.defenses, cx, cz, a.rise, retention, discharge),
+        coastalDepth(this.terrain, this.defenses, cx, cz, a.surge),
+      );
+      // 内水氾濫：下水が足りないと、低い土地に雨水がたまる
+      if (b.y < 8 && hazardFlood(this.terrain, cx, cz) > 0.3) depth = Math.max(depth, rain * (1 - sewage) * 0.9);
+      const dmg = floodDamage(depth, isWooden(b));
+      const slide = landslideChance(this.terrain, cx, cz, rain, sabo.some((f) => Math.hypot(f.x - cx, f.z - cz) < 320));
+      if (this.rand() < slide) {
+        r.landslides++;
+        exposed += b.residents;
+        r.displaced += b.residents;
+        this.destroyBuilding(b, day);
+        continue;
+      }
+      if (dmg === 'below') r.below++;
+      else if (dmg === 'above') { r.above++; b.damagedUntil = day + 60; exposed += b.residents * 0.5; r.displaced += Math.round(b.residents * 0.3); }
+      else if (dmg === 'severe') { r.above++; b.damagedUntil = day + 120; exposed += b.residents; r.displaced += b.residents; }
+      else if (dmg === 'collapse') { r.collapsed++; exposed += b.residents; r.displaced += b.residents; this.destroyBuilding(b, day); continue; }
+      // 強い風で古い木造の屋根が飛ぶ
+      if (dmg === 'none' && this.rand() < a.wind * (isWooden(b) ? (b.seismic === 'old' ? 0.12 : 0.05) : 0.01)) {
+        r.damaged++;
+        b.damagedUntil = day + 40;
+      }
+    }
+    // 避難指示が出ていれば逃げ遅れはいない。遅すぎた（当日）ときは一部
+    const lateness = !st.evacuated ? 1 : st.evacDay >= st.hit ? 0.4 : 0;
+    const rescue = this.hasFacility('garrison') || day < this.dispatchUntil ? 0.5 : 1;
+    r.stranded = Math.round(exposed * 0.12 * lateness * rescue);
+    this.finishDisaster(r, st.evacuated && r.above + r.collapsed + r.landslides === 0);
+    // 浸水の範囲を表示する
+    this.flood = { day, until: day + 6, wave: a.surge, rise: a.rise, kind: 'river' };
+    this.versions.water++;
+  }
+
+  /** 津波。海岸の低い土地が浸水する */
+  tsunami(height: number): DisasterReport {
+    const day = this.day;
+    const towers = [...this.facilities.values()].filter((f) => f.kind === 'evacTower');
+    const r: DisasterReport = {
+      day, kind: 'tsunami', title: `津波（高さ ${height} m）の被害`, below: 0, above: 0, collapsed: 0, damaged: 0, landslides: 0,
+      stranded: 0, displaced: 0, breaches: 0, evacuated: true, aid: 0, note: '',
+    };
+    this.say(`【大津波警報】高さ ${height} m の津波が押し寄せます。ただちに高台へ`, 'bad');
+    let exposed = 0, unsafe = 0;
+    for (const b of [...this.buildings.values()]) {
+      const cx = b.x + b.nx * b.d * 4, cz = b.z + b.nz * b.d * 4;
+      const depth = coastalDepth(this.terrain, this.defenses, cx, cz, height);
+      if (depth < 0.05) continue;
+      const safe = towers.some((f) => Math.hypot(f.x - cx, f.z - cz) < 400) || this.highGroundNear(cx, cz);
+      exposed += b.residents;
+      if (!safe) unsafe += b.residents;
+      const dmg = floodDamage(depth, isWooden(b));
+      if (dmg === 'collapse' && this.rand() < (isWooden(b) ? 0.9 : 0.35)) {
+        r.collapsed++; r.displaced += b.residents; this.destroyBuilding(b, day); continue;
+      }
+      if (dmg === 'below') r.below++;
+      else { r.above++; b.damagedUntil = day + 150; r.displaced += Math.round(b.residents * 0.7); }
+    }
+    const rescue = this.hasFacility('garrison') ? 0.5 : 1;
+    r.stranded = Math.round(unsafe * 0.25 * rescue);
+    r.note = exposed ? `浸水した地域の ${Math.round((1 - unsafe / exposed) * 100)}％ の人は、避難タワーや高台に逃げられました` : '';
+    this.nuclearCheck(0, null, height);
+    this.finishDisaster(r, false);
+    this.flood = { day, until: day + 8, wave: height, rise: 0, kind: 'coast' };
+    this.versions.water++;
+    return r;
+  }
+
+  /** 近く（700 m 以内）に高さ 12 m 以上の高台があるか */
+  private highGroundNear(x: number, z: number): boolean {
+    for (let k = 0; k < 12; k++) {
+      const a = (k / 12) * Math.PI * 2;
+      for (const d of [250, 500, 700]) if (heightAt(this.terrain, x + Math.cos(a) * d, z + Math.sin(a) * d) > 12) return true;
+    }
+    return false;
+  }
+
+  /** 災害の締め：国の支援、支持率、ニュース、家を失った人 */
+  private finishDisaster(r: DisasterReport, falseAlarm: boolean): void {
+    const damage = r.collapsed * 3 + r.above + r.landslides * 3 + r.damaged * 0.5;
+    if (damage >= 20) {
+      r.aid = Math.round(r.collapsed * 300 + r.above * 80 + r.landslides * 300 + r.damaged * 40);
+      refund(this.econ, r.aid);
+      const friends = this.region.neighbors.filter((n) => n.connected && n.relation > 30);
+      if (friends.length) {
+        const help = friends.length * 3_000;
+        refund(this.econ, help);
+        r.aid += help;
+        this.say(`${friends.map((n) => n.name).join('・')}から応援の職員と義援金 ${formatYen(help)} が届きました`, 'good');
+      }
+      this.say(`国が激甚災害に指定。復旧のため ${formatYen(r.aid)} を支援`, 'good');
+    }
+    this.displaced += r.displaced;
+    this.policies.lastDisasterDay = r.day;
+    if (r.stranded > 0) {
+      addModifier(this.politics, 'all', -Math.min(20, 4 + r.stranded / 30), r.day + 720, '避難の遅れ');
+      this.say(`逃げ遅れて救助された人が ${r.stranded.toLocaleString()} 人。市の避難の判断に批判が集まっています`, 'bad');
+    } else if (r.evacuated && damage > 0) {
+      addModifier(this.politics, 'all', 5, r.day + 360, '早めの避難');
+      this.say('早めの避難指示で、逃げ遅れた人はいませんでした', 'good');
+    } else if (falseAlarm) {
+      addModifier(this.politics, 'business', -2, r.day + 180, '空振り');
+      this.say('避難指示は空振りに終わりましたが、「命を守る判断」と評価する声も', 'politics');
+    }
+    const parts = [
+      r.breaches ? `堤防を越えた区間 ${r.breaches}` : '', r.above ? `床上浸水 ${r.above} 棟` : '', r.below ? `床下浸水 ${r.below} 棟` : '',
+      r.collapsed ? `全壊 ${r.collapsed} 棟` : '', r.landslides ? `土砂災害 ${r.landslides} 棟` : '', r.damaged ? `風の被害 ${r.damaged} 棟` : '',
+    ].filter(Boolean);
+    this.say(`【被害】${r.title.replace('の被害', '')}：${parts.length ? parts.join('、') : '大きな被害はありませんでした'}`, parts.length ? 'bad' : 'info');
+    this.disasterReports.push(r);
+    if (this.disasterReports.length > 20) this.disasterReports.shift();
+    this.events.push({ type: 'disaster', report: r });
+    this.versions.buildings++;
+    this.refreshServices();
+    this.recount();
+  }
+
+  /** 原発事故の判定。強い揺れか、防潮堤を越える津波で起きることがある */
+  private nuclearCheck(magnitude: number, epi: P2 | null, wave: number): void {
+    for (const f of [...this.facilities.values()]) {
+      if (f.kind !== 'nuclear' || f.downUntil > this.day + 3000) continue;
+      const I = epi ? intensityAt(this.terrain, magnitude, epi, f.x, f.z) : 0;
+      const flood = wave > 0 ? coastalDepth(this.terrain, this.defenses, f.x, f.z, wave) : 0;
+      const p = (I >= 6.3 ? 0.25 : 0) + (flood > 1 ? 0.6 : 0);
+      if (p <= 0 || this.rand() >= p) continue;
+      const r = 1500;
+      this.restricted.push({ x: f.x, z: f.z, r, until: this.day + 360 * 12 });
+      let lost = 0;
+      for (const b of [...this.buildings.values()]) {
+        if (Math.hypot(b.x - f.x, b.z - f.z) < r) { lost += b.residents; this.removeBuilding(b.id); }
+      }
+      for (const c of this.cells.values()) if (Math.hypot(c.x - f.x, c.z - f.z) < r) c.zone = 0;
+      f.downUntil = this.day + 360 * 100;
+      this.displaced += lost;
+      addModifier(this.politics, 'all', -25, this.day + 360 * 4, '原発事故');
+      addModifier(this.politics, 'green', -30, this.day + 360 * 8, '原発事故');
+      const report: DisasterReport = {
+        day: this.day, kind: 'nuclear', title: '原子力発電所の事故', below: 0, above: 0, collapsed: 0, damaged: 0, landslides: 0,
+        stranded: 0, displaced: lost, breaches: 0, evacuated: true, aid: 0,
+        note: '半径 1.5 km が帰還困難区域になり、12 年間は立ち入れません。発電所は廃炉になります',
+      };
+      this.say('【原発事故】原子力発電所で深刻な事故。半径 1.5 km に避難指示、帰還困難区域に', 'bad');
+      this.disasterReports.push(report);
+      this.events.push({ type: 'disaster', report });
+      this.versions.cells++;
+      this.versions.facilities++;
+      this.versions.water++;
+    }
+  }
+
+  /** 防衛隊に災害派遣を要請する（災害から 30 日以内） */
+  requestDispatch(): string | null {
+    if (!this.hasFacility('garrison')) return '防衛隊駐屯地がありません（「施設」の防災から建てられます）';
+    if (this.day - this.policies.lastDisasterDay > 30) return '災害から 30 日以内に要請できます';
+    if (this.day < this.dispatchUntil) return 'すでに派遣されています';
+    this.dispatchUntil = this.day + 45;
+    for (const r of [...this.rubble]) r.clearDay = Math.min(r.clearDay, this.day + 10);
+    for (const b of this.buildings.values()) if (b.damagedUntil && b.damagedUntil > this.day) b.damagedUntil -= 30;
+    this.displaced = Math.round(this.displaced * 0.85);
+    addModifier(this.politics, 'defense', 6, this.day + 360, '災害派遣');
+    this.say('防衛隊が災害派遣。救助とがれきの撤去、給水・入浴支援が始まりました', 'good');
+    this.versions.economy++;
+    return null;
+  }
+
+  /** 復興区画整理：地区のがれきを片付け、建物を新しい基準（耐震・防火）にする */
+  readjust(districtId: number): string | null {
+    const blocked = this.blockedReason();
+    if (blocked) return blocked;
+    const inD = (p: P2) => this.districts.at(p)?.id === districtId;
+    let cells = 0;
+    for (const c of this.cells.values()) if (inD(c)) cells++;
+    if (!cells) return 'この地区には区画がありません';
+    const cost = cells * 20;
+    if (cost > this.econ.money) return `資金が足りません（必要 ${formatYen(cost)}）`;
+    spend(this.econ, cost);
+    for (const r of [...this.rubble]) if (inD(r)) this.clearRubble(r.id, false);
+    let n = 0;
+    for (const b of this.buildings.values()) {
+      if (!inD(b)) continue;
+      b.seismic = 'new';
+      if (isWooden({ kind: b.kind, fireproof: false })) b.fireproof = true;
+      b.damagedUntil = 0;
+      n++;
+    }
+    addModifier(this.politics, 'progress', 3, this.day + 360, '区画整理');
+    addModifier(this.politics, 'tradition', -2, this.day + 360, '区画整理');
+    this.say(`${this.districts.get(districtId)?.name}で復興区画整理。${n} 棟が新しい基準で建て直されました（${formatYen(cost)}）`, 'good');
+    this.versions.buildings++;
+    this.versions.fires++;
+    this.recount();
+    return null;
+  }
+
+  /** 高台移転：地区の中で浸水の危険が高い土地の建物を移し、住宅地をやめる */
+  relocate(districtId: number): string | null {
+    const blocked = this.blockedReason();
+    if (blocked) return blocked;
+    const risky = (p: P2) => this.districts.at(p)?.id === districtId && (hazardFlood(this.terrain, p.x, p.z) > 1 || coastalDepth(this.terrain, newDefenses(), p.x, p.z, 6) > 1);
+    const targets = [...this.buildings.values()].filter((b) => risky(b));
+    let cells = 0;
+    for (const c of this.cells.values()) if (risky(c)) cells++;
+    if (!cells) return 'この地区には浸水の危険が高い土地がありません';
+    const cost = targets.length * 30 + cells * 2;
+    if (cost > this.econ.money) return `資金が足りません（必要 ${formatYen(cost)}）`;
+    spend(this.econ, cost);
+    for (const b of targets) this.removeBuilding(b.id);
+    for (const c of this.cells.values()) if (risky(c)) c.zone = 0;
+    addModifier(this.politics, 'tradition', -5, this.day + 720, '高台移転');
+    addModifier(this.politics, 'progress', 2, this.day + 720, '高台移転');
+    this.say(`${this.districts.get(districtId)?.name}の低い土地から ${targets.length} 棟が高台へ移転。跡地は住宅地をやめました`, 'politics');
+    this.versions.cells++;
+    this.recount();
+    return null;
+  }
+
+  private waterMonth(day: number): void {
+    // 梅雨の大雨（6〜7 月）と台風（8〜10 月）
+    const month = ((3 + Math.floor((day % 360) / 30)) % 12) + 1;
+    if (this.disastersEnabled && !this.activeStorm()) {
+      if ((month === 6 || month === 7) && this.rand() < 0.22) this.spawnStorm('rain');
+      else if (month >= 8 && month <= 10 && this.rand() < 0.25) this.spawnStorm('typhoon');
+    }
+    if (month === 4 && day % 360 === 0) this.stormNo = 0;
+    // 家を失った人：仮設住宅に入れなければ、市外へ出ていく
+    if (this.displaced > 0) {
+      let housing = 0;
+      for (const f of this.facilities.values()) housing += FACILITIES[f.kind].housing ?? 0;
+      const homeless = Math.max(0, this.displaced - housing);
+      const leave = Math.round(homeless * 0.25);
+      if (leave >= 20) this.say(`住まいを失った ${leave.toLocaleString()} 人が市外へ移りました。仮設住宅が足りません`, 'bad');
+      this.displaced = Math.max(0, Math.round((this.displaced - leave) * 0.85));
+    }
+    this.restricted = this.restricted.filter((r) => r.until > day);
+    this.versions.water++;
+  }
+
   // ---------- 政策と布告 ----------
   togglePolicy(districtId: number, id: PolicyId): boolean {
     if (this.blockedReason()) return false;
@@ -1541,7 +1964,7 @@ export class City {
     const smoke = (this.policies.districts[0] ?? []).includes('noSmoking') ? 1 : 0;
     const curfew = decreeActive(this.policies, 'curfew', this.day) ? -3 : 0;
     const saving = decreeActive(this.policies, 'powerSaving', this.day) ? -2 : 0;
-    const commutePenalty = Math.max(0, this.traffic.avgCommute - 18) * 0.5;
+    const commutePenalty = Math.max(0, this.traffic.avgCommute - 18) * 0.5 + (population ? Math.min(15, (this.displaced / population) * 40) : 0);
     const happiness = clamp01(base - commutePenalty - unemployment * 100 - (t.res - DEFAULT_TAXES.res) * 2.5 - (this.econ.bankrupt ? 15 : 0) + festival + smoke + curfew + saving);
     const connected = this.region.neighbors.some((n) => n.connected);
     this.stats = {
@@ -1615,6 +2038,12 @@ export class City {
         nextId: this.transit.nextId,
       },
       connections: structuredClone(this.connections),
+      defenses: structuredClone(this.defenses),
+      storms: structuredClone(this.storms),
+      disasterReports: this.disasterReports.slice(),
+      displaced: this.displaced,
+      restricted: this.restricted.slice(),
+      stormNo: this.stormNo,
     };
   }
 
@@ -1634,6 +2063,12 @@ export class City {
       }
     }
     if (data.connections) this.connections = structuredClone(data.connections);
+    if (data.defenses) this.defenses = structuredClone(data.defenses);
+    this.storms = structuredClone(data.storms ?? []);
+    this.disasterReports = (data.disasterReports ?? []).slice();
+    this.displaced = data.displaced ?? 0;
+    this.restricted = (data.restricted ?? []).slice();
+    this.stormNo = data.stormNo ?? 0;
     this.cells = generateCells(this.net, this.terrain, new Map(), transitObstacles(this.transit));
     const idx = this.cellIndex();
     for (let k = 0; k < data.zones.length; k += 3) {

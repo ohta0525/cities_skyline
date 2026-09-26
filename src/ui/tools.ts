@@ -14,7 +14,7 @@ import { buildRoadGhost } from '../render/roadMesh';
 import type { World3D } from '../render/world3d';
 import { heightAt } from '../world/terrain';
 
-export type ToolId = 'none' | 'road' | 'zone' | 'district' | 'facility' | 'traffic' | 'transit' | 'bulldoze';
+export type ToolId = 'none' | 'road' | 'zone' | 'district' | 'facility' | 'traffic' | 'transit' | 'defense' | 'bulldoze';
 
 const BRUSHES = [{ r: 12, label: '小' }, { r: 28, label: '中' }, { r: 56, label: '大' }];
 
@@ -35,6 +35,7 @@ export class Tools {
   facilityCat: FacilityCategory = 'power';
   facilityKind: FacilityKind = 'solar';
   trafficMode: 'oneway' | 'node' | 'elevate' = 'oneway';
+  defenseMode: 'levee' | 'seawall' = 'levee';
   nodeControl: NodeControl = 'turnlane';
   transitMode: TransitMode = 'bus';
   trackLevel: TrackLevel = 'ground';
@@ -140,6 +141,11 @@ export class Tools {
     else if (this.tool === 'facility' && hit) this.placeFacility(hit.point);
     else if (this.tool === 'traffic') this.clickTraffic();
     else if (this.tool === 'transit' && hit) this.clickTransit(hit.point);
+    else if (this.tool === 'defense' && hit) {
+      const r = this.defenseMode === 'levee' ? this.city.buildLevee(hit.point) : this.city.buildSeawall(hit.point);
+      this.ui.toast(r ?? (this.defenseMode === 'levee' ? '堤防を高くしました' : '防潮堤を高くしました'));
+      this.refresh();
+    }
   };
 
   private onMove = (e: PointerEvent) => {
@@ -202,6 +208,13 @@ export class Tools {
 
     if (this.tool === 'traffic') { this.hoverTraffic(p, hit.point.y); return; }
     if (this.tool === 'transit') { this.hoverTransit(p, hit.point.y); return; }
+    if (this.tool === 'defense') {
+      const plan = this.defenseMode === 'levee' ? this.city.planLevee(p) : this.city.planSeawall(p);
+      this.markAt(p, hit.point.y, 20, plan.ok ? '#4fc3ff' : '#ff5a4a');
+      const what = this.defenseMode === 'levee' ? `堤防（この区間：${plan.level} 段 → ${plan.level + 1} 段、水位 ${3.5 + plan.level * 2} m → ${5.5 + plan.level * 2} m まで耐える）` : `防潮堤（この区間：高さ ${[0, 5, 10][plan.level]} m → ${[0, 5, 10][plan.level + 1] ?? 10} m）`;
+      this.showTip(plan.ok ? `${what}　${formatYen(plan.cost)}` : plan.reason ?? '', !plan.ok);
+      return;
+    }
 
     if (this.tool === 'facility') {
       const plan = this.city.planFacility(p, this.facilityKind);
@@ -609,6 +622,20 @@ export class Tools {
         ? `道路の上を順にクリックして${MODES[this.transitMode].stopName}を置きます。車両は道路を通って往復します`
         : '駅を順にクリックすると、駅と駅が線路でつながります';
       el.append(hint);
+    } else if (this.tool === 'defense') {
+      const g1 = group('つくるもの');
+      btn(g1, '堤防（川岸）', this.defenseMode === 'levee', () => { this.defenseMode = 'levee'; this.renderSubbar(); this.refresh(); });
+      btn(g1, '防潮堤（海岸）', this.defenseMode === 'seawall', () => { this.defenseMode = 'seawall'; this.renderSubbar(); this.refresh(); });
+      const hint = document.createElement('span');
+      hint.className = 'hint';
+      hint.textContent = this.defenseMode === 'levee'
+        ? '川岸をクリックすると、その区間（160 m）の堤防が 1 段（2 m）高くなります。最大 3 段'
+        : '海岸線をクリックすると、その区間（160 m）の防潮堤が高くなります（5 m → 10 m）';
+      el.append(hint);
+      const tip2 = document.createElement('span');
+      tip2.className = 'hint';
+      tip2.textContent = '遊水地・地下放水路・砂防ダム・避難タワー・仮設住宅などは「施設」の防災から';
+      el.append(tip2);
     } else if (this.tool === 'bulldoze') {
       const hint = document.createElement('span');
       hint.className = 'hint';

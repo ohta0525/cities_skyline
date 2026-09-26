@@ -16,9 +16,12 @@ import type { InfoMode } from '../render/infoView';
 import { MODES, roundTripMinutes } from '../city/transit';
 import { ACTIONS, NPCS, REQUESTS, type ActionId, type NpcId } from '../city/connections';
 
-export type PanelId = 'finance' | 'people' | 'politics' | 'region' | 'transport' | 'npc' | 'policy' | 'info' | 'news';
+import { ALERT_NAMES, alertLevel, SEAWALL_HEIGHTS } from '../city/water';
+import { FACILITIES } from '../city/facilities';
 
-const TITLES: Record<PanelId, string> = { finance: '財政', people: '住民', politics: '政治', region: '地域', transport: '交通と公共交通', npc: '関係者（コネ）', policy: '政策と布告', info: '情報とハザードマップ', news: '新聞' };
+export type PanelId = 'finance' | 'people' | 'politics' | 'region' | 'transport' | 'npc' | 'policy' | 'disaster' | 'info' | 'news';
+
+const TITLES: Record<PanelId, string> = { finance: '財政', people: '住民', politics: '政治', region: '地域', transport: '交通と公共交通', npc: '関係者（コネ）', disaster: '防災と復興', policy: '政策と布告', info: '情報とハザードマップ', news: '新聞' };
 
 const INFO_VIEWS: { mode: InfoMode; label: string; group: string }[] = [
   { mode: 'none', label: 'ふつう', group: '表示' },
@@ -84,7 +87,7 @@ export class Panels {
   /** 毎フレーム呼ぶ。変化があったときだけ描き直す */
   update(): void {
     const c = this.getCity();
-    const v = c.versions.economy * 1000 + c.versions.news + c.versions.buildings * 7 + c.versions.services * 13 + c.versions.fires * 17 + c.versions.transit * 19 + c.versions.traffic * 23;
+    const v = c.versions.economy * 1000 + c.versions.news + c.versions.buildings * 7 + c.versions.services * 13 + c.versions.fires * 17 + c.versions.transit * 19 + c.versions.traffic * 23 + c.versions.water * 29;
     document.querySelectorAll<HTMLButtonElement>('.rail button[data-panel]').forEach((b) => {
       b.setAttribute('aria-pressed', String(b.dataset.panel === this.open));
     });
@@ -92,6 +95,7 @@ export class Panels {
     badge.hidden = this.open === 'news' || c.versions.news <= this.seenNews || !c.news.length;
     document.getElementById('politicsBadge')!.hidden = !c.politics.pledgeChoiceOpen;
     document.getElementById('npcBadge')!.hidden = !c.connections.requests.length;
+    document.getElementById('disasterBadge')!.hidden = !c.activeStorm() && c.displaced < 50;
     const last = c.news.at(-1);
     const ticker = document.getElementById('tickerText')!;
     const text = last ? `${formatDate(dateOf(last.day))}　${last.text}` : 'まだ記事はありません';
@@ -119,7 +123,7 @@ export class Panels {
     ({
       finance: () => this.finance(c, body), people: () => this.people(c, body), politics: () => this.politics(c, body),
       region: () => this.region(c, body), policy: () => this.policy(c, body),
-      transport: () => this.transport(c, body), npc: () => this.npc(c, body), info: () => this.info(c, body), news: () => this.newsList(c, body),
+      transport: () => this.transport(c, body), npc: () => this.npc(c, body), disaster: () => this.disaster(c, body), info: () => this.info(c, body), news: () => this.newsList(c, body),
     })[this.open]();
     const scroll = this.el.querySelector('.pbody')?.scrollTop ?? 0;
     this.el.replaceChildren(head, body);
@@ -418,6 +422,60 @@ export class Panels {
       }
       card.append(acts);
       el.append(card);
+    }
+  }
+
+  private disasterDistrict = 0;
+
+  private disaster(c: City, el: HTMLElement): void {
+    const st = c.activeStorm();
+    if (st) {
+      const lv = alertLevel(st, c.day);
+      el.append(h('p', { cls: 'alert' }, `${st.name}：警戒レベル ${lv}（${ALERT_NAMES[lv]}）。最も強まるのは ${Math.max(0, st.hit - c.day)} 日後。${st.evacuated ? '避難指示を出しています' : 'まだ避難指示は出していません'}`));
+    }
+    el.append(h('h3', {}, '備え'));
+    const riverSecs = c.defenses.levees.filter((_, i) => {
+      const z = i * 160 - 1024 + 80;
+      const k = Math.min(c.terrain.river.length - 1, Math.max(0, Math.round(((z + 1024) / 2048) * 512)));
+      return c.terrain.river[k].level > 0.01;
+    });
+    const avgLevee = riverSecs.length ? riverSecs.reduce((a, v) => a + v, 0) / riverSecs.length : 0;
+    const walls = c.defenses.seawalls.filter((v) => v > 0).length;
+    let towers = 0, housing = 0;
+    for (const f of c.facilities.values()) { if (f.kind === 'evacTower') towers++; housing += FACILITIES[f.kind].housing ?? 0; }
+    el.append(
+      row('堤防（川の区間の平均）', `${avgLevee.toFixed(1)} 段（水位 ${(3.5 + avgLevee * 2).toFixed(1)} m まで耐える）`),
+      row('防潮堤のある海岸', `${walls} 区間（最大 ${SEAWALL_HEIGHTS[Math.max(0, ...c.defenses.seawalls)]} m）`),
+      row('避難所の受け入れ', `${c.shelterCapacity().toLocaleString()} 人（人口 ${c.stats.population.toLocaleString()} 人）`, c.shelterCapacity() < c.stats.population * 0.3 ? 'neg' : ''),
+      row('津波避難タワー', `${towers} 基`),
+      row('防衛隊', c.hasFacility('garrison') ? '駐屯地あり（災害派遣を要請できる）' : 'なし'),
+    );
+    el.append(h('p', { cls: 'note' }, '「防災」で堤防と防潮堤を高くし、「施設」の防災から遊水地・地下放水路・砂防ダム・避難タワー・防災公園・仮設住宅・防衛隊駐屯地を建てられます。ハザードマップは「情報」で見られます。'));
+    el.append(h('h3', {}, '復興'));
+    el.append(
+      row('住まいを失った人', `${c.displaced.toLocaleString()} 人`, c.displaced > housing ? 'neg' : ''),
+      row('仮設住宅', `${housing.toLocaleString()} 人分`),
+      row('がれき', `${c.rubble.length} か所`),
+      row('修理を待つ建物', `${[...c.buildings.values()].filter((b) => b.damagedUntil && b.damagedUntil > c.day).length} 棟`),
+    );
+    el.append(h('div', { cls: 'row' }, h('button', { onclick: () => { const r = c.requestDispatch(); this.ui.toast(r ?? '防衛隊に災害派遣を要請しました'); } }, '防衛隊に災害派遣を要請')));
+    if (c.districts.list.length) {
+      const chips = h('div', { cls: 'chips' });
+      if (!c.districts.get(this.disasterDistrict)) this.disasterDistrict = c.districts.list[0].id;
+      for (const d of c.districts.list) chips.append(h('button', { ariaPressed: String(d.id === this.disasterDistrict), onclick: () => { this.disasterDistrict = d.id; this.seen = -1; this.render(); } }, d.name));
+      el.append(h('h3', {}, '地区の復興事業'), chips,
+        h('div', { cls: 'policy-row' }, h('button', { onclick: () => { const r = c.readjust(this.disasterDistrict); this.ui.toast(r ?? '区画整理をしました'); } }, '区画整理'),
+          h('div', {}, h('b', {}, '復興区画整理'), h('p', { cls: 'note' }, 'がれきを片付け、地区の建物を新耐震・防火の造りに建て直す（区画 1 マスあたり 20万円）'))),
+        h('div', { cls: 'policy-row' }, h('button', { onclick: () => { const r = c.relocate(this.disasterDistrict); this.ui.toast(r ?? '高台移転をしました'); } }, '高台移転'),
+          h('div', {}, h('b', {}, '高台移転'), h('p', { cls: 'note' }, '地区の中で浸水の危険が高い土地から建物を移し、住宅地をやめる（1 棟 30万円）'))));
+    } else {
+      el.append(h('p', { cls: 'note' }, '地区を塗り分けると、地区ごとに復興区画整理や高台移転ができます。'));
+    }
+    if (c.disasterReports.length) {
+      el.append(h('h3', {}, '災害の記録'));
+      for (const r of [...c.disasterReports].reverse().slice(0, 8)) {
+        el.append(row(formatDate(dateOf(r.day)), `${r.title.replace('の被害', '')}：床上 ${r.above}・全壊 ${r.collapsed}・土砂 ${r.landslides}・逃げ遅れ ${r.stranded}`, r.stranded ? 'neg' : ''));
+      }
     }
   }
 

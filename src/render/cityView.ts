@@ -11,6 +11,7 @@ import { FireFx, iconTexture } from './effects';
 import { HAZARD_MODES, TINTS, buildHazardOverlay, type InfoMode, type Tint } from './infoView';
 import { FACILITIES, type FacilityCategory } from '../city/facilities';
 import { Vehicles, buildTransitStatic, pathY } from './transitView';
+import { Rain, buildDefenses, buildFloodWater } from './waterView';
 
 export type Pickable = { kind: 'building' | 'facility'; id: number };
 import type { World3D } from './world3d';
@@ -53,6 +54,13 @@ export class CityView {
   private overlay = new THREE.Group();
   private seenTransit = '';
   private seenTraffic = -1;
+  private defensesMesh?: THREE.Mesh;
+  private defenseMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.95 });
+  private floodMesh?: THREE.Mesh;
+  private seenWater = '';
+  readonly rain = new Rain();
+  /** 0〜1。嵐のときの空の暗さ */
+  weather = 0;
   private infoSeen = '';
   private hazard?: THREE.Mesh;
   private rings = new THREE.Group();
@@ -65,7 +73,7 @@ export class CityView {
     this.group.add(this.buildingGroup, this.facilityGroup, this.rubbleGroup, this.fire.group, this.icons, this.rings, this.zones.zoned, this.zones.grid, this.districts.mesh, this.highlightMesh);
     this.icons.renderOrder = 20;
     this.vehicles = new Vehicles(this.buildingMat);
-    this.group.add(this.transitStatic, this.vehicles.group, this.overlay);
+    this.group.add(this.transitStatic, this.vehicles.group, this.overlay, this.rain.lines);
     this.highlightMesh.renderOrder = 11;
     this.highlightMesh.visible = false;
     world.scene.add(this.group);
@@ -125,6 +133,24 @@ export class CityView {
       this.vehicles.syncTransit(c);
       this.seenTransit = tKey;
     }
+    // 堤防・防潮堤・浸水
+    const wKey = `${v.water}:${this.world.terrainEpoch}:${Math.floor(day)}`;
+    if (wKey !== this.seenWater) {
+      if (this.defensesMesh) { this.group.remove(this.defensesMesh); this.defensesMesh.geometry.dispose(); }
+      this.defensesMesh = buildDefenses(c, this.defenseMat);
+      this.group.add(this.defensesMesh);
+      if (this.floodMesh) { this.group.remove(this.floodMesh); this.floodMesh.geometry.dispose(); this.floodMesh = undefined; }
+      const f = c.flood;
+      if (f && day < f.until) {
+        const fade = Math.max(0.15, 1 - (day - f.day) / (f.until - f.day));
+        const m = buildFloodWater(c, fade);
+        if (m) { this.floodMesh = m; this.group.add(m); }
+      }
+      this.seenWater = wKey;
+    }
+    // 嵐の近くは空が暗く、雨が降る
+    const st = c.activeStorm();
+    this.weather = st && day >= st.hit - 1 && day <= st.end ? (st.kind === 'typhoon' ? 0.8 : 0.6) * (day >= st.hit ? 1 : 0.6) : 0;
     if (v.traffic !== this.seenTraffic) {
       this.vehicles.syncCars(c);
       this.seenTraffic = v.traffic;
@@ -188,6 +214,7 @@ export class CityView {
   update(time: number, dt = 0): void {
     this.fire.update(time);
     this.vehicles.update(dt);
+    this.rain.update(Math.min(0.1, dt || 0.016), this.world.controls.target, this.weather);
   }
 
   private place(m: THREE.Mesh, o: { ax: number; az: number; nx: number; nz: number; x: number; y: number; z: number }): void {

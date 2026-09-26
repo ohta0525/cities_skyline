@@ -54,6 +54,8 @@ export class World3D {
   private shakeLeft = 0;
   private shakeTotal = 1;
   private shakeAmp = 0;
+  private hemi!: THREE.HemisphereLight;
+  private weather = 0;
 
   constructor(private canvas: HTMLCanvasElement, quality: Quality, miniature: number) {
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: false, powerPreference: 'high-performance' });
@@ -64,7 +66,8 @@ export class World3D {
 
     this.scene.background = BG;
     this.scene.fog = new THREE.Fog(BG, 5000, 14000);
-    this.scene.add(new THREE.HemisphereLight('#e4f0ff', '#8c7a5c', 1.25));
+    this.hemi = new THREE.HemisphereLight('#e4f0ff', '#8c7a5c', 1.25);
+    this.scene.add(this.hemi);
     this.sun.castShadow = true;
     this.sun.shadow.bias = -0.0004;
     this.sun.shadow.normalBias = 0.6;
@@ -258,6 +261,19 @@ export class World3D {
     this.raycaster.setFromCamera(ndc, this.camera);
     const hit = new THREE.Vector3();
     return this.raycaster.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 1, 0), -y), hit);
+  }
+
+  /** 天気（0：晴れ〜1：嵐）。光を弱め、空を暗くする */
+  setWeather(k: number): void {
+    this.weather += (k - this.weather) * 0.05;
+    const w = this.weather;
+    this.sun.intensity = 3.1 * (1 - w * 0.75);
+    this.hemi.intensity = 1.25 * (1 - w * 0.35);
+    const bg = (this.scene.background as THREE.Color);
+    bg.set('#c8d5d3').lerp(new THREE.Color('#6d7880'), w);
+    (this.scene.fog as THREE.Fog).color.copy(bg);
+    (this.scene.fog as THREE.Fog).near = 5000 - w * 4200;
+    (this.scene.fog as THREE.Fog).far = 14000 - w * 11000;
   }
 
   /** 地震の揺れの演出 */

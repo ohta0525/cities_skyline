@@ -142,6 +142,56 @@ const MAKERS: Record<FacilityKind, (g: B, r: () => number, W: number, D: number)
     for (let k = 0; k < 4; k++) tree(g, range(r, -3, 3), range(r, 1.5, D - 1.5), 0.8 + r() * 0.4, k % 2 ? '#e7a3b8' : '#4f8f3f');
     g.box(1.5, 3, 0.06, 0.6, 3, 3.5, '#8a6a48');
   },
+  retention: (g, _r, W, D) => {
+    lotPad(g, W, D, '#7fae5a');
+    g.box(-W / 2 + 1, W / 2 - 1, -0.5, 0.9, 1, 1.8, '#9aa37a');
+    g.box(-W / 2 + 1, W / 2 - 1, -0.5, 0.9, D - 1.8, D - 1, '#9aa37a');
+    g.box(-W / 2 + 3, W / 2 - 3, 0.07, 0.12, 4, D - 4, '#5f9fb8');
+    for (let k = 0; k < 5; k++) tree(g, -W / 2 + 2 + k * 5, 2.5, 0.7);
+  },
+  discharge: (g, _r, W, D) => {
+    lotPad(g, W, D, CON);
+    g.cylinder(0, D / 2, 8, 0, 3, '#b9b6ae', 24, '#3e4a52');
+    g.box(-W / 2 + 1, -2, 0, 7, 1, 7, '#dcd8cc', WIN.factory);
+    g.box(3, W / 2 - 1, 0, 5, D - 7, D - 1, '#8e969c');
+  },
+  sabo: (g, _r, W, D) => {
+    lotPad(g, W, D, '#9d998f');
+    for (let k = 0; k < 3; k++) g.box(-W / 2 + 1 + k * 1.5, W / 2 - 1 - k * 1.5, 0, 6 - k * 1.8, D / 2 - 2 + k * 1.2, D / 2 + 1 + k * 1.2, '#b8b3a8');
+  },
+  evacTower: (g, _r, W, D) => {
+    lotPad(g, W, D, CON);
+    for (const [x, z] of [[-2.8, 1.5], [2.8, 1.5], [2.8, 6.5], [-2.8, 6.5]]) g.box(x - 0.3, x + 0.3, 0, 12, z - 0.3, z + 0.3, '#d9dde0');
+    g.box(-3.4, 3.4, 12, 12.4, 0.9, 7.1, '#e8e6e0');
+    g.box(-3.4, 3.4, 12.4, 13.4, 0.9, 1.1, '#f2c230');
+    g.box(-3.4, 3.4, 12.4, 13.4, 6.9, 7.1, '#f2c230');
+    for (let k = 0; k < 6; k++) g.box(1.2, 2.6, k * 2, k * 2 + 0.2, 1 + k, 2 + k, '#9aa1a6');
+  },
+  disasterPark: (g, r, W, D) => {
+    lotPad(g, W, D, '#86b85c');
+    g.box(-W / 2 + 1.5, -W / 2 + 6, 0, 3.5, D - 7, D - 2, '#d6d2c6');
+    g.box(-W / 2 + 1.5, -W / 2 + 6, 3.5, 3.8, D - 7.3, D - 1.7, '#2f7fc1');
+    g.box(2, W / 2 - 2, 0.06, 0.12, 3, 11, '#c9b690');
+    for (let k = 0; k < 6; k++) tree(g, range(r, -W / 2 + 2, W / 2 - 2), range(r, 12, D - 2), 1, '#4f8f3f');
+  },
+  tempHousing: (g, _r, W, D) => {
+    lotPad(g, W, D, '#b3afa5');
+    for (let k = 0; k < 3; k++) {
+      const z = 1.5 + k * 4.8;
+      g.box(-W / 2 + 1, W / 2 - 1, 0, 2.9, z, z + 3.6, '#e6e8e8', WIN.house);
+      g.box(-W / 2 + 0.8, W / 2 - 0.8, 2.9, 3.1, z - 0.2, z + 3.8, '#9aa3a8');
+    }
+  },
+  garrison: (g, r, W, D) => {
+    lotPad(g, W, D, '#9d998f');
+    g.box(-W / 2 + 2, 2, 0, 9, 2, 12, '#c7c2b0', WIN.apartment);
+    g.box(-W / 2 + 2, 2, 0, 9, 16, 26, '#c7c2b0', WIN.apartment);
+    for (let k = 0; k < 4; k++) g.box(6 + (k % 2) * 5, 9 + (k % 2) * 5, 0.1, 2.8, 4 + Math.floor(k / 2) * 9, 11 + Math.floor(k / 2) * 9, '#5b6b48');
+    g.cylinder(W / 2 - 3, 3, 0.12, 0, 12, '#c8cccf', 6);
+    g.box(W / 2 - 2.9, W / 2 - 0.4, 10.3, 11.8, 2.95, 3.05, '#f5f5f0');
+    g.box(W / 2 - 2.9, W / 2 - 0.4, 10.3, 10.6, 2.94, 3.06, '#2c4a7a');
+    void r;
+  },
   parkRide: (g, r, W, D) => {
     lotPad(g, W, D, '#5d6064');
     for (let k = 0; k < 6; k++) g.box(-W / 2 + 1.5 + k * 2.4, -W / 2 + 1.62 + k * 2.4, 0.06, 0.09, 3, 8, '#f1efe7');
