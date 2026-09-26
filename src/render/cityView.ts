@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import type { Building } from '../city/buildings';
 import type { City } from '../city/city';
 import { bbox, closestOnCurve } from '../city/geometry';
-import { halfWidth } from '../city/roads';
+import { halfWidth, sampleProfile } from '../city/roads';
 import { buildBuildingGeometry, buildingMaterial } from './buildingMesh';
 import { DistrictOverlay, ZoneOverlay } from './overlays';
 import { buildRoadGhost, buildRoadMesh, roadMaterial } from './roadMesh';
@@ -10,6 +10,7 @@ import { buildFacilityGeometry, buildRubbleGeometry } from './facilityMesh';
 import { FireFx, iconTexture } from './effects';
 import { HAZARD_MODES, TINTS, buildHazardOverlay, type InfoMode, type Tint } from './infoView';
 import { FACILITIES, type FacilityCategory } from '../city/facilities';
+import { Vehicles, buildTransitStatic, pathY } from './transitView';
 
 export type Pickable = { kind: 'building' | 'facility'; id: number };
 import type { World3D } from './world3d';
@@ -47,6 +48,11 @@ export class CityView {
     water: new THREE.SpriteMaterial({ map: iconTexture('水', '#2f7fc1'), depthTest: false }),
   };
   private infoMode: InfoMode = 'none';
+  private transitStatic = new THREE.Group();
+  readonly vehicles: Vehicles;
+  private overlay = new THREE.Group();
+  private seenTransit = '';
+  private seenTraffic = -1;
   private infoSeen = '';
   private hazard?: THREE.Mesh;
   private rings = new THREE.Group();
@@ -58,6 +64,8 @@ export class CityView {
     this.group.name = 'city';
     this.group.add(this.buildingGroup, this.facilityGroup, this.rubbleGroup, this.fire.group, this.icons, this.rings, this.zones.zoned, this.zones.grid, this.districts.mesh, this.highlightMesh);
     this.icons.renderOrder = 20;
+    this.vehicles = new Vehicles(this.buildingMat);
+    this.group.add(this.transitStatic, this.vehicles.group, this.overlay);
     this.highlightMesh.renderOrder = 11;
     this.highlightMesh.visible = false;
     world.scene.add(this.group);
@@ -107,7 +115,21 @@ export class CityView {
       this.seen.services = v.services;
     }
     this.syncFire();
-    const infoKey = `${this.infoMode}:${v.services}:${v.buildings}:${v.facilities}:${this.world.terrainEpoch}`;
+    const tKey = `${v.transit}:${v.roads}:${v.traffic}:${this.world.terrainEpoch}`;
+    if (tKey !== this.seenTransit) {
+      for (const g of [...this.transitStatic.children]) {
+        g.traverse((o) => (o as THREE.Mesh).geometry?.dispose());
+        this.transitStatic.remove(g);
+      }
+      this.transitStatic.add(buildTransitStatic(c, this.buildingMat));
+      this.vehicles.syncTransit(c);
+      this.seenTransit = tKey;
+    }
+    if (v.traffic !== this.seenTraffic) {
+      this.vehicles.syncCars(c);
+      this.seenTraffic = v.traffic;
+    }
+    const infoKey = `${this.infoMode}:${v.services}:${v.buildings}:${v.facilities}:${this.world.terrainEpoch}:${this.infoMode === 'traffic' || this.infoMode === 'transit' ? `${v.traffic}:${v.transit}:${v.roads}` : ''}`;
     if (infoKey !== this.infoSeen) { this.applyInfo(); this.infoSeen = infoKey; }
     if (v.cells !== this.seen.cells || buildingsChanged) {
       this.zones.rebuild(c.cells.values(), c.terrain, false);
@@ -163,8 +185,9 @@ export class CityView {
     }
   }
 
-  update(time: number): void {
+  update(time: number, dt = 0): void {
     this.fire.update(time);
+    this.vehicles.update(dt);
   }
 
   private place(m: THREE.Mesh, o: { ax: number; az: number; nx: number; nz: number; x: number; y: number; z: number }): void {
@@ -270,6 +293,7 @@ export class CityView {
     // 建物の色分け
     const tint = (id: number): Tint | null => {
       const s = per?.get(id);
+      if (mode === 'traffic' || mode === 'transit') return null;
       if (!s) return mode === 'none' || HAZARD_MODES.includes(mode) ? null : 'none';
       switch (mode) {
         case 'power': return s.power ? 'good' : 'bad';
@@ -305,12 +329,87 @@ export class CityView {
         this.rings.add(ring);
       }
     }
+    // 交通量と路線
+    for (const m of [...this.overlay.children] as THREE.Mesh[]) { this.overlay.remove(m); m.geometry.dispose(); }
+    if (mode === 'traffic') this.overlay.add(this.trafficOverlay());
+    if (mode === 'transit') this.overlay.add(this.transitOverlay());
     // ハザードマップ
     if (this.hazard) { this.group.remove(this.hazard); this.hazard.geometry.dispose(); this.hazard = undefined; }
     if (HAZARD_MODES.includes(mode)) {
       this.hazard = buildHazardOverlay(this.city.terrain, mode);
       this.group.add(this.hazard);
     }
+  }
+
+  /** 道路を混み具合で色分けする */
+  private trafficOverlay(): THREE.Mesh {
+    const pos: number[] = [], col: number[] = [];
+    const c = new THREE.Color();
+    const ramp = (x: number) => (x < 0.5 ? c.set('#4cc26a') : x < 0.8 ? c.set('#e8d23e') : x < 1 ? c.set('#f08a2e') : c.set('#e0413a'));
+    for (const s of this.city.net.segments.values()) {
+      const vc = this.city.traffic.vc.get(s.id) ?? 0;
+      const vol = this.city.traffic.volume.get(s.id) ?? 0;
+      ramp(vol < 1 ? 0 : vc);
+      const cv = this.city.net.curveOf(s);
+      const n = 16;
+      const w = Math.max(1.5, halfWidth(s.type) * 0.8);
+      for (let k = 0; k < n; k++) {
+        const pts = [k / n, (k + 1) / n].map((t) => {
+          const p = { x: 0, z: 0 };
+          const u = 1 - t;
+          p.x = u * u * cv.p0.x + 2 * u * t * cv.c.x + t * t * cv.p2.x;
+          p.z = u * u * cv.p0.z + 2 * u * t * cv.c.z + t * t * cv.p2.z;
+          return { ...p, t };
+        });
+        const dx = pts[1].x - pts[0].x, dz = pts[1].z - pts[0].z, l = Math.hypot(dx, dz) || 1;
+        const nx = -dz / l * w, nz = dx / l * w;
+        const y0 = sampleProfile(s.ys, pts[0].t) + 1.2, y1 = sampleProfile(s.ys, pts[1].t) + 1.2;
+        const q = [[pts[0].x + nx, y0, pts[0].z + nz], [pts[1].x + nx, y1, pts[1].z + nz], [pts[1].x - nx, y1, pts[1].z - nz], [pts[0].x - nx, y0, pts[0].z - nz]];
+        for (const i of [0, 1, 2, 0, 2, 3]) { pos.push(...q[i]); col.push(c.r, c.g, c.b); }
+      }
+    }
+    return this.flatMesh(pos, col, 0.85);
+  }
+
+  /** 路線を色つきの線で示す */
+  private transitOverlay(): THREE.Mesh {
+    const pos: number[] = [], col: number[] = [];
+    const c = new THREE.Color();
+    const t = this.city.transit;
+    for (const l of t.lines.values()) {
+      c.set(l.color);
+      const half = Math.floor(l.path.length / 2) + 1;
+      const w = l.mode === 'bus' ? 1.6 : 2.4;
+      for (let i = 0; i < Math.min(half, l.path.length - 1); i++) {
+        const a = l.path[i], b = l.path[i + 1];
+        const dx = b.x - a.x, dz = b.z - a.z, len = Math.hypot(dx, dz);
+        if (len < 0.1) continue;
+        const nx = -dz / len * w, nz = dx / len * w;
+        const y = (l.mode === 'rail' ? 12 : 4) + (l.mode === 'subway' ? 2 : pathY(this.city, a));
+        const q = [[a.x + nx, y, a.z + nz], [b.x + nx, y, b.z + nz], [b.x - nx, y, b.z - nz], [a.x - nx, y, a.z - nz]];
+        for (const k of [0, 1, 2, 0, 2, 3]) { pos.push(...q[k]); col.push(c.r, c.g, c.b); }
+      }
+    }
+    for (const st of t.stops.values()) {
+      c.set('#ffffff');
+      const y = (st.mode === 'rail' ? 12.2 : 4.2) + (st.mode === 'subway' ? 2 : pathY(this.city, st));
+      const r = st.mode === 'bus' || st.mode === 'tram' ? 4 : 9;
+      for (let k = 0; k < 16; k++) {
+        const a0 = (k / 16) * Math.PI * 2, a1 = ((k + 1) / 16) * Math.PI * 2;
+        pos.push(st.x, y, st.z, st.x + Math.cos(a0) * r, y, st.z + Math.sin(a0) * r, st.x + Math.cos(a1) * r, y, st.z + Math.sin(a1) * r);
+        col.push(c.r, c.g, c.b, c.r, c.g, c.b, c.r, c.g, c.b);
+      }
+    }
+    return this.flatMesh(pos, col, 0.95);
+  }
+
+  private flatMesh(pos: number[], col: number[], opacity: number): THREE.Mesh {
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+    const m = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true, opacity, depthTest: false, depthWrite: false, side: THREE.DoubleSide }));
+    m.renderOrder = 9;
+    return m;
   }
 
   private clearTreesAlongRoads(): void {

@@ -53,7 +53,16 @@ export interface Cell {
 export const cellKey = (seg: number, side: number, i: number, depth: number) => `${seg}:${side}:${i}:${depth}`;
 
 /** 道路網から区画のマスを作り直す。前のマスの用途地域は位置で引き継ぐ */
-export function generateCells(net: RoadNetwork, terrain: Terrain, previous: Map<string, Cell>): Map<string, Cell> {
+export interface Obstacle { a: P2; b: P2; half: number }
+
+function distToSegment(p: P2, a: P2, b: P2): number {
+  const abx = b.x - a.x, abz = b.z - a.z;
+  const l2 = abx * abx + abz * abz || 1;
+  const f = Math.max(0, Math.min(1, ((p.x - a.x) * abx + (p.z - a.z) * abz) / l2));
+  return Math.hypot(p.x - (a.x + abx * f), p.z - (a.z + abz * f));
+}
+
+export function generateCells(net: RoadNetwork, terrain: Terrain, previous: Map<string, Cell>, obstacles: Obstacle[] = []): Map<string, Cell> {
   const candidates: Cell[] = [];
   const segs = [...net.segments.values()];
   const curves = new Map(segs.map((s) => [s.id, net.curveOf(s)]));
@@ -94,6 +103,7 @@ export function generateCells(net: RoadNetwork, terrain: Terrain, previous: Map<
           const y = heightAt(terrain, x, z);
           if (Math.abs(y - roadY) > 3 + depth * 1.5) break;
           if (nearOtherRoad({ x, z }, s.id, half)) break;
+          if (obstacles.some((o) => distToSegment({ x, z }, o.a, o.b) < o.half + 4.5)) break;
           candidates.push({
             key: cellKey(s.id, side, i, depth), seg: s.id, side, i, depth, x, z, y,
             ax: tan.x, az: tan.z, nx: nrm.x * side, nz: nrm.z * side, roadY, zone: 0, building: 0, facility: 0,

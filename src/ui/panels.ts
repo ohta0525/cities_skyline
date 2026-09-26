@@ -13,9 +13,12 @@ import { IMPORT, UTILITY_NAMES, UTILITY_UNITS, type Utility } from '../city/serv
 import { prob30 } from '../city/disasters';
 import type { InfoMode } from '../render/infoView';
 
-export type PanelId = 'finance' | 'people' | 'politics' | 'region' | 'policy' | 'info' | 'news';
+import { MODES, roundTripMinutes } from '../city/transit';
+import { ACTIONS, NPCS, REQUESTS, type ActionId, type NpcId } from '../city/connections';
 
-const TITLES: Record<PanelId, string> = { finance: '財政', people: '住民', politics: '政治', region: '地域', policy: '政策と布告', info: '情報とハザードマップ', news: '新聞' };
+export type PanelId = 'finance' | 'people' | 'politics' | 'region' | 'transport' | 'npc' | 'policy' | 'info' | 'news';
+
+const TITLES: Record<PanelId, string> = { finance: '財政', people: '住民', politics: '政治', region: '地域', transport: '交通と公共交通', npc: '関係者（コネ）', policy: '政策と布告', info: '情報とハザードマップ', news: '新聞' };
 
 const INFO_VIEWS: { mode: InfoMode; label: string; group: string }[] = [
   { mode: 'none', label: 'ふつう', group: '表示' },
@@ -24,6 +27,7 @@ const INFO_VIEWS: { mode: InfoMode; label: string; group: string }[] = [
   { mode: 'fire', label: '消防', group: 'サービス' }, { mode: 'police', label: '警察', group: 'サービス' },
   { mode: 'health', label: '医療', group: 'サービス' }, { mode: 'education', label: '教育', group: 'サービス' },
   { mode: 'happiness', label: '満足度', group: 'サービス' },
+  { mode: 'traffic', label: '交通量', group: '交通' }, { mode: 'transit', label: '路線', group: '交通' },
   { mode: 'flood', label: '浸水', group: 'ハザードマップ' }, { mode: 'liquefaction', label: '液状化', group: 'ハザードマップ' },
   { mode: 'landslide', label: '土砂災害', group: 'ハザードマップ' }, { mode: 'shaking', label: '揺れやすさ', group: 'ハザードマップ' },
 ];
@@ -80,13 +84,14 @@ export class Panels {
   /** 毎フレーム呼ぶ。変化があったときだけ描き直す */
   update(): void {
     const c = this.getCity();
-    const v = c.versions.economy * 1000 + c.versions.news + c.versions.buildings * 7 + c.versions.services * 13 + c.versions.fires * 17;
+    const v = c.versions.economy * 1000 + c.versions.news + c.versions.buildings * 7 + c.versions.services * 13 + c.versions.fires * 17 + c.versions.transit * 19 + c.versions.traffic * 23;
     document.querySelectorAll<HTMLButtonElement>('.rail button[data-panel]').forEach((b) => {
       b.setAttribute('aria-pressed', String(b.dataset.panel === this.open));
     });
     const badge = document.getElementById('newsBadge')!;
     badge.hidden = this.open === 'news' || c.versions.news <= this.seenNews || !c.news.length;
     document.getElementById('politicsBadge')!.hidden = !c.politics.pledgeChoiceOpen;
+    document.getElementById('npcBadge')!.hidden = !c.connections.requests.length;
     const last = c.news.at(-1);
     const ticker = document.getElementById('tickerText')!;
     const text = last ? `${formatDate(dateOf(last.day))}　${last.text}` : 'まだ記事はありません';
@@ -113,7 +118,8 @@ export class Panels {
     const head = h('div', { cls: 'phead' }, h('h2', {}, TITLES[this.open]), h('button', { cls: 'close', onclick: () => this.toggle(this.open!), title: '閉じる' }, '×'));
     ({
       finance: () => this.finance(c, body), people: () => this.people(c, body), politics: () => this.politics(c, body),
-      region: () => this.region(c, body), policy: () => this.policy(c, body), info: () => this.info(c, body), news: () => this.newsList(c, body),
+      region: () => this.region(c, body), policy: () => this.policy(c, body),
+      transport: () => this.transport(c, body), npc: () => this.npc(c, body), info: () => this.info(c, body), news: () => this.newsList(c, body),
     })[this.open]();
     const scroll = this.el.querySelector('.pbody')?.scrollTop ?? 0;
     this.el.replaceChildren(head, body);
@@ -299,6 +305,10 @@ export class Panels {
     } else if (['fire', 'police', 'health', 'education', 'happiness'].includes(m)) {
       el.append(h('div', { cls: 'chips' }, h('span', {}, h('i', { style: 'background:#3f93dc' } as never), '十分'), h('span', {}, h('i', { style: 'background:#5fbf6a' } as never), 'まあまあ'), h('span', {}, h('i', { style: 'background:#e8b83e' } as never), '不足'), h('span', {}, h('i', { style: 'background:#e0513e' } as never), '届いていない')));
       if (m !== 'happiness') el.append(h('p', { cls: 'note' }, '水色の円は施設のサービスが届く範囲です。'));
+    } else if (m === 'traffic') {
+      el.append(h('div', { cls: 'chips' }, ...[['#4cc26a', 'すいている'], ['#e8d23e', 'やや混雑'], ['#f08a2e', '混雑'], ['#e0413a', '渋滞']].map(([c2, t]) => h('span', {}, h('i', { style: `background:${c2}` } as never), t))));
+    } else if (m === 'transit') {
+      el.append(h('p', { cls: 'note' }, '路線の色で道のりを、白い丸で停留所と駅を示します。地下鉄も地上から見えるように表示します。'));
     } else if (['flood', 'liquefaction', 'landslide', 'shaking'].includes(m)) {
       const bar = h('i');
       bar.style.background = 'linear-gradient(90deg, #f7f5a8, #ffd87a, #f7a660, #e8615a, #b34a8f)';
@@ -335,6 +345,79 @@ export class Panels {
       for (const q of [...c.quakes].reverse().slice(0, 6)) {
         el.append(row(formatDate(dateOf(q.day)), `M${q.magnitude}・最大震度 ${q.maxShindo}・全壊 ${q.collapsed}・損傷 ${q.damaged}`));
       }
+    }
+  }
+
+  private transport(c: City, el: HTMLElement): void {
+    const t = c.traffic;
+    el.append(
+      row('車の通勤の平均時間（片道）', t.carTrips ? `${t.avgCommute.toFixed(0)} 分` : '—', t.avgCommute > 30 ? 'neg' : ''),
+      row('渋滞している道路を走る車', pct(t.congestion, 0), t.congestion > 0.25 ? 'neg' : ''),
+      row('車で通勤する人（1 日）', `${t.carTrips.toLocaleString()} 人`),
+      row('公共交通の利用（1 日・片道）', `${(c.riders?.total ?? 0).toLocaleString()} 人`),
+      row('踏切', `${c.crossings.length} か所${t.busyCrossings ? `（うち開かずの踏切 ${t.busyCrossings}）` : ''}`, t.busyCrossings ? 'neg' : ''),
+    );
+    el.append(h('p', { cls: 'note' }, '渋滞がひどいと、住民の満足度と住宅の需要、経済界の支持が下がります。「情報」の交通量で混んでいる道路が見られます。'));
+    el.append(h('h3', {}, '路線'));
+    if (!c.transit.lines.size) el.append(h('p', { cls: 'note' }, '下の「公共交通」から、バス・路面電車・鉄道・地下鉄の路線をつくれます。'));
+    const blocked = !!c.blockedReason();
+    for (const l of c.transit.lines.values()) {
+      const def = MODES[l.mode];
+      const trip = roundTripMinutes(l);
+      const stops = l.stops.map((id, i) => {
+        const st = c.transit.stops.get(id);
+        const num = l.mode === 'rail' || l.mode === 'subway' ? `${l.code}${String(i + 1).padStart(2, '0')}` : '';
+        return h('span', {}, num ? h('b', {}, num) : '', `${st?.name ?? '？'}${i < l.stops.length - 1 ? ' ― ' : ''}`);
+      });
+      const stepper = (label: string, value: string, dec: () => void, inc: () => void) =>
+        h('span', { cls: 'stepper' }, label, h('button', { onclick: dec, disabled: blocked, title: '減らす' }, '−'), h('b', {}, value), h('button', { onclick: inc, disabled: blocked, title: '増やす' }, '+'));
+      const sw = h('i', { cls: 'swatch' });
+      sw.style.background = l.color;
+      el.append(h('div', { cls: 'line-card' },
+        h('div', { cls: 'lhead' }, sw, h('b', {}, l.name), h('span', { cls: 'note' }, `${def.name}${l.operator === 'private' ? '（私鉄）' : ''}${l.broken ? '・不通' : ''}`)),
+        h('p', { cls: 'stops' }, ...stops),
+        row('利用者（1 日）', `${l.riders.toLocaleString()} 人`),
+        row('運行間隔', `${Math.max(1, Math.round(trip / l.vehicles))} 分ごと（1 周 ${Math.round(trip)} 分）`),
+        l.operator === 'city' ? row('月の収支', `${formatYen(l.income - l.cost)}（運賃 ${formatYen(l.income)}／運行費 ${formatYen(l.cost)}）`, l.income - l.cost < 0 ? 'neg' : 'pos') : row('運営', '瑞穂電鉄（収支は私鉄）'),
+        h('div', { cls: 'row' },
+          stepper('車両 ', `${l.vehicles}`, () => c.setLine(l.id, { vehicles: l.vehicles - 1 }), () => c.setLine(l.id, { vehicles: l.vehicles + 1 })),
+          stepper('　運賃 ', `${l.fare}円`, () => c.setLine(l.id, { fare: l.fare - 10 }), () => c.setLine(l.id, { fare: l.fare + 10 })),
+          h('button', { onclick: () => c.removeLine(l.id), disabled: blocked }, '廃止')),
+      ));
+    }
+  }
+
+  private npc(c: City, el: HTMLElement): void {
+    const k = c.connections;
+    el.append(row('疑惑度', h('span', { cls: 'v' }, bar(k.suspicion, 100, k.suspicion > 60 ? '#d9573f' : k.suspicion > 30 ? '#e8b83e' : '#3ea865'), ` ${Math.round(k.suspicion)}`), k.suspicion > 60 ? 'neg' : ''));
+    el.append(h('p', { cls: 'note' }, '会食や便宜で関係が深まると、見返りが得られます。ただし疑惑度がたまると、記者にスクープされて支持率が下がり、90 を超えるとリコールの出直し選挙になります。疑惑度は毎月少しずつ下がります。'));
+    if (k.recallDay) el.append(h('p', { cls: 'alert' }, `リコールの出直し選挙まであと ${Math.ceil((k.recallDay - c.day) / 30)} か月です。`));
+    const blocked = !!c.blockedReason();
+    for (const id of Object.keys(NPCS) as NpcId[]) {
+      const n = NPCS[id];
+      const rel = k.rel[id];
+      const card = h('div', { cls: 'npc' },
+        h('div', { cls: 'who' }, h('b', {}, n.name), h('span', { cls: 'note' }, n.title)),
+        h('p', { cls: 'note' }, n.intro),
+        row('関係', h('span', { cls: 'v' }, bar(rel, 100, rel >= 50 ? '#3ea865' : '#6fb1d9'), ` ${Math.round(rel)}`)),
+        ...n.perks.map((p) => h('p', { cls: `perk${rel >= p.at ? ' on' : ''}` }, `${rel >= p.at ? '✓' : `関係 ${p.at}〜`}　${p.text}`)),
+      );
+      const req = k.requests.find((r) => r.npc === id);
+      if (req) {
+        card.append(h('div', { cls: 'request' }, h('b', {}, '陳情　'), req.text, h('br'), h('span', { cls: 'note' }, `受けると：${REQUESTS[id].effect}`),
+          h('div', { cls: 'row' },
+            h('button', { onclick: () => { const r = c.answerRequest(id, true); if (r) this.ui.toast(r); }, disabled: blocked }, '受ける'),
+            h('button', { onclick: () => c.answerRequest(id, false) }, '断る（関係 −5）'))));
+      }
+      const acts = h('div', { cls: 'row' });
+      for (const a of Object.keys(ACTIONS) as ActionId[]) {
+        const def = ACTIONS[a];
+        const ready = (k.cooldowns[`${id}:${a}`] ?? 0) <= c.day;
+        const b = h('button', { onclick: () => { const r = c.npcAction(id, a); if (r) this.ui.toast(r); }, disabled: blocked || !ready, title: def.note }, ready ? def.name : `${def.name}（${Math.ceil(((k.cooldowns[`${id}:${a}`] ?? 0) - c.day) / 30)} か月後）`);
+        acts.append(b);
+      }
+      card.append(acts);
+      el.append(card);
     }
   }
 

@@ -142,6 +142,18 @@ const MAKERS: Record<FacilityKind, (g: B, r: () => number, W: number, D: number)
     for (let k = 0; k < 4; k++) tree(g, range(r, -3, 3), range(r, 1.5, D - 1.5), 0.8 + r() * 0.4, k % 2 ? '#e7a3b8' : '#4f8f3f');
     g.box(1.5, 3, 0.06, 0.6, 3, 3.5, '#8a6a48');
   },
+  parkRide: (g, r, W, D) => {
+    lotPad(g, W, D, '#5d6064');
+    for (let k = 0; k < 6; k++) g.box(-W / 2 + 1.5 + k * 2.4, -W / 2 + 1.62 + k * 2.4, 0.06, 0.09, 3, 8, '#f1efe7');
+    for (let k = 0; k < 6; k++) g.box(-W / 2 + 1.5 + k * 2.4, -W / 2 + 1.62 + k * 2.4, 0.06, 0.09, D - 8, D - 3, '#f1efe7');
+    const colors = ['#d9dde0', '#3c4650', '#b8322c', '#e7e3d8', '#2f5fa8'];
+    for (let k = 0; k < 8; k++) {
+      if (r() < 0.3) continue;
+      const x = -W / 2 + 2.1 + (k % 5) * 2.4, z = k < 5 ? 4 : D - 7;
+      g.box(x, x + 1.6, 0.1, 1.3, z, z + 3.6, colors[k % colors.length]);
+    }
+    g.box(W / 2 - 3, W / 2 - 1, 0, 3.5, 1, 2.5, '#2f5fa8', 0, '#f1efe7');
+  },
   shrine: (g, r, W, D) => {
     lotPad(g, W, D, '#cfc5a8');
     // 鳥居

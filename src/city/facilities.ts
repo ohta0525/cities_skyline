@@ -1,9 +1,9 @@
 import type { FactionId } from './politics';
 
-export type FacilityCategory = 'power' | 'water' | 'garbage' | 'fire' | 'police' | 'health' | 'education' | 'leisure';
+export type FacilityCategory = 'power' | 'water' | 'garbage' | 'fire' | 'police' | 'health' | 'education' | 'leisure' | 'transport';
 
 export const CATEGORY_NAMES: Record<FacilityCategory, string> = {
-  power: '電気', water: '上下水道', garbage: 'ゴミ', fire: '消防', police: '警察', health: '医療', education: '教育', leisure: '公園・文化',
+  power: '電気', water: '上下水道', garbage: 'ゴミ', fire: '消防', police: '警察', health: '医療', education: '教育', leisure: '公園・文化', transport: '交通',
 };
 
 export type FacilityKind =
@@ -14,7 +14,8 @@ export type FacilityKind =
   | 'koban' | 'policeStation'
   | 'clinic' | 'hospital'
   | 'elementary' | 'highschool'
-  | 'park' | 'shrine';
+  | 'park' | 'shrine'
+  | 'parkRide';
 
 export interface FacilityDef {
   name: string;
@@ -64,6 +65,7 @@ export const FACILITIES: Record<FacilityKind, FacilityDef> = {
   elementary: { name: '小学校', cat: 'education', w: 2, d: 3, cost: 9_000, upkeep: 250, radius: 600, faction: { id: 'progress', amount: 1 }, note: '校庭つき。災害時は避難所になる' },
   highschool: { name: '高校', cat: 'education', w: 3, d: 3, cost: 18_000, upkeep: 450, radius: 1_000, faction: { id: 'progress', amount: 2 }, note: '広い範囲の子どもが通う' },
   park: { name: '公園', cat: 'leisure', w: 1, d: 1, cost: 300, upkeep: 10, radius: 160, happiness: 6, note: '周りの満足度が上がる' },
+  parkRide: { name: '駐車場（パークアンドライド）', cat: 'transport', w: 2, d: 2, cost: 1_200, upkeep: 30, radius: 250, note: '近く（250 m）の駅まで車で来て電車に乗り換えられる。駅を使える範囲が 1.6 倍に' },
   shrine: { name: '神社', cat: 'leisure', w: 1, d: 2, cost: 1_500, upkeep: 20, radius: 260, happiness: 4, faction: { id: 'tradition', amount: 3 }, note: '鎮守の森。保守・伝統派が喜ぶ' },
 };
 

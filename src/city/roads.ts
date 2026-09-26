@@ -20,11 +20,15 @@ export const ROAD_TYPES: Record<RoadType, RoadTypeDef> = {
   avenue: { name: '幹線道路', width: 18, sidewalk: 2.6, median: 1.6 },
 };
 
+/** 交差点の制御。auto は 3 本以上つながると信号 */
+export type NodeControl = 'auto' | 'turnlane' | 'grade';
+
 export interface RoadNode {
   id: number;
   x: number;
   z: number;
   y: number;
+  control?: NodeControl;
 }
 
 export interface RoadSegment {
@@ -37,6 +41,8 @@ export interface RoadSegment {
   ys: number[];
   /** その位置が橋か */
   bridge: boolean[];
+  /** 一方通行：1 は a→b だけ、-1 は b→a だけ */
+  oneway?: 0 | 1 | -1;
 }
 
 export type Snap =
@@ -283,8 +289,8 @@ export class RoadNetwork {
     const l = resample(0, t, curveLength(left)), r = resample(t, 1, curveLength(right));
     this.segments.delete(id);
     const idL = this.nextId++, idR = this.nextId++;
-    this.segments.set(idL, { id: idL, a: s.a, b: m, c: left.c, type: s.type, ys: l.ys, bridge: l.br });
-    this.segments.set(idR, { id: idR, a: m, b: s.b, c: right.c, type: s.type, ys: r.ys, bridge: r.br });
+    this.segments.set(idL, { id: idL, a: s.a, b: m, c: left.c, type: s.type, ys: l.ys, bridge: l.br, oneway: s.oneway ?? 0 });
+    this.segments.set(idR, { id: idR, a: m, b: s.b, c: right.c, type: s.type, ys: r.ys, bridge: r.br, oneway: s.oneway ?? 0 });
     return m;
   }
 

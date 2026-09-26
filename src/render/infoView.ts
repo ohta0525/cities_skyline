@@ -4,7 +4,8 @@ import { HALF, MAP_SIZE, heightAt, type Terrain } from '../world/terrain';
 
 export type InfoMode =
   | 'none' | 'power' | 'water' | 'sewage' | 'garbage' | 'fire' | 'police' | 'health' | 'education' | 'happiness'
-  | 'flood' | 'liquefaction' | 'landslide' | 'shaking';
+  | 'flood' | 'liquefaction' | 'landslide' | 'shaking'
+  | 'traffic' | 'transit';
 
 export const HAZARD_MODES: InfoMode[] = ['flood', 'liquefaction', 'landslide', 'shaking'];
 

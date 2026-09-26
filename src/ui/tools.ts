@@ -5,13 +5,16 @@ import { ROAD_TYPES, type RoadPlan, type RoadType, type Snap } from '../city/roa
 import { ZONES, type ZoneId } from '../city/zones';
 import { formatYen } from '../city/economy';
 import { CATEGORY_NAMES, FACILITIES, facilitiesIn, type FacilityCategory, type FacilityKind } from '../city/facilities';
+import { MODES, trackCost, trackProfile, type TrackLevel, type TransitMode } from '../city/transit';
+import { NODE_CONTROL_COST, NODE_CONTROL_NAMES } from '../city/city';
+import type { NodeControl } from '../city/roads';
 import type { CityView } from '../render/cityView';
 import { ring } from '../render/overlays';
 import { buildRoadGhost } from '../render/roadMesh';
 import type { World3D } from '../render/world3d';
 import { heightAt } from '../world/terrain';
 
-export type ToolId = 'none' | 'road' | 'zone' | 'district' | 'facility' | 'bulldoze';
+export type ToolId = 'none' | 'road' | 'zone' | 'district' | 'facility' | 'traffic' | 'transit' | 'bulldoze';
 
 const BRUSHES = [{ r: 12, label: '小' }, { r: 28, label: '中' }, { r: 56, label: '大' }];
 
@@ -31,6 +34,14 @@ export class Tools {
   districtErase = false;
   facilityCat: FacilityCategory = 'power';
   facilityKind: FacilityKind = 'solar';
+  trafficMode: 'oneway' | 'node' | 'elevate' = 'oneway';
+  nodeControl: NodeControl = 'turnlane';
+  transitMode: TransitMode = 'bus';
+  trackLevel: TrackLevel = 'ground';
+  privateRail = false;
+  /** 作りかけの路線の停留所・駅 */
+  pending: number[] = [];
+  private hoverTarget: { seg?: number; node?: number; track?: number; stop?: number } | null = null;
 
   private start: Snap | null = null;
   private control: P2 | null = null;
@@ -68,6 +79,7 @@ export class Tools {
     window.addEventListener('keydown', (e) => {
       if (e.key === 'Shift') this.shift = true;
       if (e.key === 'Escape') this.cancel();
+      if (e.key === 'Enter' && this.tool === 'transit' && !(e.target instanceof HTMLInputElement)) this.finishLine();
     });
     window.addEventListener('keyup', (e) => { if (e.key === 'Shift') this.shift = false; });
 
@@ -86,6 +98,7 @@ export class Tools {
     const blocked = tool !== 'none' && this.city.blockedReason();
     if (blocked) { this.ui.toast(blocked); tool = 'none'; }
     this.tool = tool;
+    this.pending = [];
     this.start = null;
     this.control = null;
     this.plan = null;
@@ -101,6 +114,12 @@ export class Tools {
 
   /** Esc：置きかけの道路をやめる。何もなければ道具を外す */
   private cancel(force = false): void {
+    if (!force && this.tool === 'transit' && this.pending.length) {
+      this.pending = [];
+      this.renderSubbar();
+      this.refresh();
+      return;
+    }
     if (!force && this.tool === 'road' && this.start) {
       this.start = null; this.control = null; this.plan = null;
       this.refresh();
@@ -119,6 +138,8 @@ export class Tools {
     else if ((this.tool === 'zone' || this.tool === 'district') && hit) { this.painting = true; this.paint(hit.point); }
     else if (this.tool === 'bulldoze') this.bulldoze();
     else if (this.tool === 'facility' && hit) this.placeFacility(hit.point);
+    else if (this.tool === 'traffic') this.clickTraffic();
+    else if (this.tool === 'transit' && hit) this.clickTransit(hit.point);
   };
 
   private onMove = (e: PointerEvent) => {
@@ -140,6 +161,7 @@ export class Tools {
 
   /** カーソルの位置に合わせて、見本や吸着の表示を更新する */
   refresh(): void {
+    (this.snapRing.material as THREE.MeshBasicMaterial).color.set('#f2b134');
     this.ghost.visible = false;
     this.facilityGhost.visible = false;
     this.brushRing.visible = false;
@@ -151,6 +173,14 @@ export class Tools {
     if (this.tool === 'bulldoze') {
       const b = this.view.pick(this.pointer.x, this.pointer.y, this.canvas);
       let target: { building?: number; facility?: number; segment?: number } | null = null;
+      const stop = hit ? [...this.city.transit.stops.values()].find((st) => Math.hypot(st.x - hit.point.x, st.z - hit.point.z) < 12) : undefined;
+      if (stop) {
+        this.bulldozeTarget = { stop: stop.id } as never;
+        this.view.highlight(null);
+        this.markAt(stop, stop.y ?? hit!.point.y, 8, '#ff5a4a');
+        this.showTip(`クリックで${stop.name}（${MODES[stop.mode].stopName}）を撤去`);
+        return;
+      }
       if (b?.kind === 'building') target = { building: b.id };
       else if (b?.kind === 'facility') target = { facility: b.id };
       else if (hit) {
@@ -169,6 +199,9 @@ export class Tools {
     }
     if (!hit) return;
     const p = { x: hit.point.x, z: hit.point.z };
+
+    if (this.tool === 'traffic') { this.hoverTraffic(p, hit.point.y); return; }
+    if (this.tool === 'transit') { this.hoverTransit(p, hit.point.y); return; }
 
     if (this.tool === 'facility') {
       const plan = this.city.planFacility(p, this.facilityKind);
@@ -300,6 +333,112 @@ export class Tools {
     this.city.paintDistrict(p, this.brush, this.districtId);
   }
 
+
+  private markAt(p: { x: number; z: number }, y: number, r: number, color: string): void {
+    this.snapRing.visible = true;
+    this.snapRing.position.set(p.x, y + 1.5, p.z);
+    this.snapRing.scale.setScalar(r);
+    (this.snapRing.material as THREE.MeshBasicMaterial).color.set(color);
+  }
+
+  // ---------- 交通 ----------
+  private hoverTraffic(p: { x: number; z: number }, y: number): void {
+    this.hoverTarget = null;
+    if (this.trafficMode === 'oneway') {
+      const s = this.city.net.segmentAt(p);
+      if (!s) { this.showTip('道路をクリックすると一方通行を切り替えます'); return; }
+      this.hoverTarget = { seg: s.seg.id };
+      this.view.highlight({ segment: s.seg.id });
+      const now = s.seg.oneway === 1 ? '一方通行（→）' : s.seg.oneway === -1 ? '一方通行（←）' : '両方向';
+      this.showTip(`今：${now}。クリックで切り替え`);
+      return;
+    }
+    this.view.highlight(null);
+    if (this.trafficMode === 'node') {
+      let best: { id: number; d: number } | null = null;
+      for (const n of this.city.net.nodes.values()) {
+        const d = Math.hypot(n.x - p.x, n.z - p.z);
+        if (d < 16 && this.city.net.segmentsAt(n.id).length >= 3 && (!best || d < best.d)) best = { id: n.id, d };
+      }
+      if (!best) { this.showTip('3 本以上の道路が交わる交差点をクリック'); return; }
+      const n = this.city.net.nodes.get(best.id)!;
+      this.hoverTarget = { node: n.id };
+      this.markAt(n, n.y, 14, '#f2b134');
+      const cost = Math.round(NODE_CONTROL_COST[this.nodeControl] * this.city.buildDiscount());
+      this.showTip(`今：${NODE_CONTROL_NAMES[n.control ?? 'auto']}。クリックで${NODE_CONTROL_NAMES[this.nodeControl]}に（${formatYen(cost)}）`);
+      return;
+    }
+    let best: { track: number; x: number; z: number; d: number } | null = null;
+    for (const c of this.city.crossings) {
+      const d = Math.hypot(c.x - p.x, c.z - p.z);
+      if (d < 30 && (!best || d < best.d)) best = { track: c.track, x: c.x, z: c.z, d };
+    }
+    if (!best) { this.showTip('踏切（地上の線路と道路が交わる場所）をクリック'); return; }
+    this.hoverTarget = { track: best.track };
+    this.markAt(best, y, 12, '#f2b134');
+    this.showTip(`クリックでこの区間の線路を高架にする（${formatYen(this.city.elevateCost(best.track))}）`);
+  }
+
+  private clickTraffic(): void {
+    const t = this.hoverTarget;
+    if (!t) return;
+    let r: string | null = null;
+    if (t.seg) r = this.city.cycleOneway(t.seg);
+    else if (t.node) r = this.city.setNodeControl(t.node, this.nodeControl);
+    else if (t.track) r = this.city.elevateTrack(t.track);
+    if (r) this.ui.toast(r);
+    this.refresh();
+  }
+
+  // ---------- 公共交通 ----------
+  private hoverTransit(p: { x: number; z: number }, y: number): void {
+    const mode = this.transitMode;
+    const plan = this.city.planStop(mode, p, this.trackLevel, this.privateRail);
+    this.markAt(plan.p, y, mode === 'bus' || mode === 'tram' ? 5 : 12, plan.ok ? '#4fc3ff' : '#ff5a4a');
+    const count = this.pending.length;
+    let tip = plan.reuse ? `${this.city.transit.stops.get(plan.reuse)!.name} を路線に加える` : plan.ok ? `${MODES[mode].stopName}を置く（${formatYen(plan.cost)}）` : plan.reason ?? '';
+    // 鉄道・地下鉄：前の駅からの線路の見本
+    const prev = count ? this.city.transit.stops.get(this.pending[count - 1]) : undefined;
+    if (prev && (mode === 'rail' || mode === 'subway') && plan.ok) {
+      const level: TrackLevel = mode === 'subway' ? 'under' : this.trackLevel;
+      const cv = { p0: { x: prev.x, z: prev.z }, c: { x: (prev.x + plan.p.x) / 2, z: (prev.z + plan.p.z) / 2 }, p2: plan.p };
+      const prof = trackProfile(this.city.terrain, cv, level);
+      const cost = Math.round(trackCost(mode, level, prof.length) * this.city.buildDiscount() * (this.privateRail ? 0.3 : 1));
+      this.ghost.geometry.dispose();
+      const ys = prof.ys.length ? prof.ys.map((v) => (level === 'under' ? heightAt(this.city.terrain, prev.x, prev.z) + 1 : v)) : [y, y];
+      this.ghost.geometry = buildRoadGhost([{ curve: cv, ys, bridge: prof.bridge.length ? prof.bridge : [false, false] }], 'local');
+      (this.ghost.material as THREE.MeshBasicMaterial).color.set(prof.ok ? '#4fc3ff' : '#ff5a4a');
+      this.ghost.visible = true;
+      tip = prof.ok ? `線路 ${Math.round(prof.length)} m（${formatYen(cost)}）＋ ${tip}` : prof.reason ?? '';
+    }
+    this.showTip(`${tip}${count ? `　／　${count} か所選択中（Enter で完成）` : ''}`, !plan.ok);
+  }
+
+  private clickTransit(point: THREE.Vector3): void {
+    const mode = this.transitMode;
+    const id = this.city.addStop(mode, { x: point.x, z: point.z }, this.trackLevel, this.privateRail);
+    if (typeof id === 'string') { this.ui.toast(id); return; }
+    if (this.pending.at(-1) === id) return;
+    const prev = this.pending.at(-1);
+    if (prev !== undefined && (mode === 'rail' || mode === 'subway')) {
+      const r = this.city.connectStops(prev, id, this.trackLevel, this.privateRail);
+      if (r) { this.ui.toast(r); return; }
+    }
+    this.pending.push(id);
+    this.renderSubbar();
+    this.refresh();
+  }
+
+  finishLine(): void {
+    if (this.pending.length < 2) { this.ui.toast('停留所（駅）を 2 か所以上選んでください'); return; }
+    const r = this.city.createLine(this.transitMode, this.pending, this.privateRail && this.transitMode === 'rail' ? 'private' : 'city');
+    if (typeof r === 'string') { this.ui.toast(r); return; }
+    this.ui.toast(`${r.name}が開業しました`);
+    this.pending = [];
+    this.renderSubbar();
+    this.refresh();
+  }
+
   private placeFacility(point: THREE.Vector3): void {
     const plan = this.city.planFacility({ x: point.x, z: point.z }, this.facilityKind);
     if (!plan.ok) { this.ui.toast(plan.reason ?? 'ここには置けません'); return; }
@@ -311,7 +450,9 @@ export class Tools {
   private bulldoze(): void {
     const t = this.bulldozeTarget;
     if (!t) return;
-    if (t.building) this.city.removeBuilding(t.building);
+    const st = (t as { stop?: number }).stop;
+    if (st) this.city.removeStop(st);
+    else if (t.building) this.city.removeBuilding(t.building);
     else if (t.facility) this.city.removeFacility(t.facility);
     else if (t.segment) this.city.removeRoad(t.segment);
     this.bulldozeTarget = null;
@@ -431,6 +572,42 @@ export class Tools {
       const hint = document.createElement('span');
       hint.className = 'hint';
       hint.textContent = FACILITIES[this.facilityKind].note;
+      el.append(hint);
+    } else if (this.tool === 'traffic') {
+      const g1 = group('道具');
+      const modes: [typeof this.trafficMode, string][] = [['oneway', '一方通行'], ['node', '交差点'], ['elevate', '踏切の高架化']];
+      for (const [m, label] of modes) btn(g1, label, this.trafficMode === m, () => { this.trafficMode = m; this.renderSubbar(); this.refresh(); });
+      if (this.trafficMode === 'node') {
+        const g2 = group('交差点の制御');
+        for (const c of ['auto', 'turnlane', 'grade'] as NodeControl[]) {
+          btn(g2, `${NODE_CONTROL_NAMES[c]}${NODE_CONTROL_COST[c] ? `（${formatYen(NODE_CONTROL_COST[c])}）` : ''}`, this.nodeControl === c, () => { this.nodeControl = c; this.renderSubbar(); });
+        }
+      }
+      const hint = document.createElement('span');
+      hint.className = 'hint';
+      hint.textContent = { oneway: '一方通行にすると、その向きの車線が増えて流れやすくなります', node: '右折レーンで信号待ちが減り、立体交差では止まらずに通れます', elevate: '列車の多い踏切は「開かずの踏切」になり、渋滞の元になります' }[this.trafficMode];
+      el.append(hint);
+    } else if (this.tool === 'transit') {
+      const g1 = group('種類');
+      for (const m of ['bus', 'tram', 'rail', 'subway'] as TransitMode[]) {
+        btn(g1, MODES[m].name, this.transitMode === m, () => { this.transitMode = m; this.pending = []; this.renderSubbar(); this.refresh(); });
+      }
+      if (this.transitMode === 'rail') {
+        const g2 = group('線路');
+        btn(g2, `地上（${MODES.rail.trackCost}万円/m）`, this.trackLevel === 'ground', () => { this.trackLevel = 'ground'; this.renderSubbar(); });
+        btn(g2, `高架（${MODES.rail.elevatedCost}万円/m）`, this.trackLevel === 'elevated', () => { this.trackLevel = 'elevated'; this.renderSubbar(); });
+        if (this.city.connections.rel.rail >= 40) {
+          btn(g2, this.privateRail ? '私鉄に任せる：はい' : '私鉄に任せる：いいえ', this.privateRail, () => { this.privateRail = !this.privateRail; this.renderSubbar(); });
+        }
+      }
+      const g3 = group(`選択中 ${this.pending.length} か所`);
+      btn(g3, '路線を完成（Enter）', false, () => this.finishLine()).disabled = this.pending.length < 2;
+      btn(g3, 'やり直す', false, () => { this.pending = []; this.renderSubbar(); });
+      const hint = document.createElement('span');
+      hint.className = 'hint';
+      hint.textContent = this.transitMode === 'bus' || this.transitMode === 'tram'
+        ? `道路の上を順にクリックして${MODES[this.transitMode].stopName}を置きます。車両は道路を通って往復します`
+        : '駅を順にクリックすると、駅と駅が線路でつながります';
       el.append(hint);
     } else if (this.tool === 'bulldoze') {
       const hint = document.createElement('span');

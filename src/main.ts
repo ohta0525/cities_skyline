@@ -440,7 +440,7 @@ function frame(now: number): void {
   const dt = Math.min(0.1, (now - last) / 1000);
   last = now;
   view.sync(sim.day);
-  view.update(now / 1000);
+  view.update(now / 1000, speed === 0 ? 0 : dt * Math.min(speed, 3));
   hall.update();
   checkPolitics();
   world.render(dt);

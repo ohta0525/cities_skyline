@@ -6,7 +6,14 @@ import { computeServices, type ServiceReport } from './services';
 import { bigQuakeRate, intensityAt, liquefaction, quakeDamage, quakeFireChance, shindoLabel, type Fire, type QuakeReport, type Rubble } from './disasters';
 import { DECREES, POLICIES, decreeActive, hasPolicy, newPolicies, type DecreeId, type PolicyId, type PolicyState } from './policies';
 import type { FactionId } from './politics';
-import { waterLevelAt } from '../world/terrain';
+import { computeTraffic, EMPTY_TRAFFIC, type TrafficResult } from './traffic';
+import {
+  MODES, findCrossings, newTransit, ridership, roadPath, snapStopToRoad, trackCost, trackCurve, trackFor, trackPath, trackProfile,
+  transitObstacles, type Crossing, type Line, type Ridership, type Stop, type TrackLevel, type TransitMode, type TransitState,
+} from './transit';
+import { ACTIONS, NPCS, REQUESTS, newConnections, type ActionId, type ConnectionsState, type NpcId } from './connections';
+import type { NodeControl } from './roads';
+import { heightAt, waterLevelAt } from '../world/terrain';
 import { Districts, type District } from './districts';
 import {
   DEFAULT_TAXES, ROAD_COST, BRIDGE_FACTOR, ROAD_REFUND, closeMonth, formatYen, newEconomy, planCost, refund, setTax, spend, takeLoan,
@@ -84,7 +91,12 @@ export interface CityData {
   rubble?: Rubble[];
   policies?: PolicyState;
   quakes?: QuakeReport[];
+  transit?: { stops: Stop[]; tracks: import('./transit').Track[]; lines: Line[]; nextId: number };
+  connections?: ConnectionsState;
 }
+
+export const NODE_CONTROL_COST: Record<NodeControl, number> = { auto: 0, turnlane: 300, grade: 50_000 };
+export const NODE_CONTROL_NAMES: Record<NodeControl, string> = { auto: '信号', turnlane: '右折レーン付き信号', grade: '立体交差' };
 
 const clamp = (v: number) => Math.max(-100, Math.min(100, v));
 const clamp01 = (v: number) => Math.max(0, Math.min(100, v));
@@ -117,12 +129,18 @@ export class City {
   services: ServiceReport | null = null;
   /** 災害を起こすかどうか（設定） */
   disastersEnabled = true;
+  transit: TransitState = newTransit();
+  traffic: TrafficResult = EMPTY_TRAFFIC;
+  riders: Ridership | null = null;
+  crossings: Crossing[] = [];
+  connections: ConnectionsState = newConnections();
+  private trafficDirty = true;
   private nextFacilityId = 1;
   private nextRubbleId = 1;
   day = 0;
   stats: CityStats = { ...EMPTY_STATS };
   /** 変更のたびに増える番号。描画側はこれを見て作り直す */
-  versions = { roads: 0, cells: 0, buildings: 0, districts: 0, economy: 0, news: 0, facilities: 0, fires: 0, services: 0 };
+  versions = { roads: 0, cells: 0, buildings: 0, districts: 0, economy: 0, news: 0, facilities: 0, fires: 0, services: 0, transit: 0, traffic: 0 };
   /** 地形を変えた範囲（描画側が取り出して反映する） */
   terrainChanges: GridRange[] = [];
   /** 画面に知らせたい出来事（選挙結果など）。描画側が取り出す */
@@ -162,7 +180,12 @@ export class City {
   }
 
   roadCost(plan: RoadPlan): number {
-    return planCost(plan);
+    return Math.round(planCost(plan) * this.buildDiscount());
+  }
+
+  /** 建設会社との関係が良いと安くなる */
+  buildDiscount(): number {
+    return this.connections.rel.builder >= 50 ? 0.85 : 1;
   }
 
   /** 道路を作れるか（お金・市長・財政）。できなければ理由 */
@@ -171,13 +194,13 @@ export class City {
     const blocked = this.blockedReason();
     if (blocked) return blocked;
     if (this.econ.bankrupt) return '財政再生団体のため、新しい道路は作れません';
-    const cost = planCost(plan);
+    const cost = this.roadCost(plan);
     if (cost > this.econ.money) return `資金が足りません（必要 ${formatYen(cost)}）`;
     return null;
   }
 
   buildRoad(plan: RoadPlan): number[] {
-    const cost = planCost(plan);
+    const cost = this.roadCost(plan);
     const ids = this.net.build(plan);
     if (!ids.length) return ids;
     spend(this.econ, cost);
@@ -203,11 +226,13 @@ export class City {
 
   private afterRoadChange(): void {
     const old = this.cells;
-    this.cells = generateCells(this.net, this.terrain, old);
+    this.cells = generateCells(this.net, this.terrain, old, transitObstacles(this.transit));
     this.rehomeFacilities();
     this.rehomeBuildings();
     updateConnections(this.region, this.net);
+    this.rehomeStops();
     this.refreshServices();
+    this.trafficDirty = true;
     this.versions.roads++;
     this.versions.cells++;
     this.versions.economy++;
@@ -331,6 +356,7 @@ export class City {
       this.day = d;
       this.growDay(d);
       this.disasterDay(d);
+      if (this.trafficDirty && d % 3 === 0) this.refreshTraffic();
       if (d % 30 === 0) this.monthly(d);
       if (d % 360 === 0) this.yearly(d);
     }
@@ -405,9 +431,12 @@ export class City {
     const def = KINDS[kind];
     const year = yearOf(day);
     const district = this.districts.at({ x: x / n, z: z / n })?.id ?? 0;
-    let cap = eraOf(year).maxFloors[kind] ?? def.floors[1];
-    if (hasPolicy(this.policies, district, 'heightLimit')) cap = Math.min(cap, 4);
-    const hi = Math.max(def.floors[0], Math.min(def.floors[1], cap));
+    // 駅前は高くなる（私鉄と仲が良いと、私鉄の駅前はさらに）
+    const st = this.nearestStation({ x: x / n, z: z / n }, 280);
+    const bonus = st && (zone === 2 || zone === 4) ? (st.private && this.connections.rel.rail >= 70 ? 4 : 2) : 0;
+    let hi = Math.min(def.floors[1], eraOf(year).maxFloors[kind] ?? def.floors[1]) + bonus;
+    if (hasPolicy(this.policies, district, 'heightLimit')) hi = Math.min(hi, 4);
+    hi = Math.max(def.floors[0], hi);
     const floors = def.floors[0] + Math.floor(this.rand() * (hi - def.floors[0] + 1));
     const id = this.nextBuildingId++;
     const b: Building = {
@@ -500,6 +529,8 @@ export class City {
   private monthly(day: number): void {
     updateConnections(this.region, this.net);
     this.refreshServices();
+    this.refreshTraffic();
+    const transitMoney = this.transitMonth();
     this.policyMonth(day);
     this.recount();
     const s = this.stats;
@@ -519,12 +550,15 @@ export class City {
       buildingValue: buildingValueSum,
       roadLength,
       trade: tradeIncome(this.region, s.indJobs, s.comJobs),
-      grant: 300 + s.population * 0.05,
+      grant: 300 + s.population * 0.05 + (this.connections.rel.governor >= 50 ? 300 : 0),
       defense: aiActive && mayor === 'hawk' ? 800 : 0,
       services: [...this.facilities.values()].reduce((a, f) => a + FACILITIES[f.kind].upkeep, 0),
       imports: this.services?.importCost ?? 0,
       policies: this.policyCost(),
+      transitIncome: transitMoney.income,
+      transitCost: transitMoney.cost,
     });
+    this.connectionsMonth(day);
     if (!wasBankrupt && this.econ.bankrupt) this.say('財政再生団体に転落しました。新しい道路は作れず、税率も下げられません', 'bad');
     if (wasBankrupt && !this.econ.bankrupt) this.say('財政再生団体から脱しました', 'good');
 
@@ -780,7 +814,8 @@ export class City {
     this.fireDay(day);
     // がれきの撤去と、被災した建物の修理
     const emergency = decreeActive(this.policies, 'emergency', day);
-    for (const r of [...this.rubble]) if (day >= r.clearDay - (emergency ? 20 : 0)) this.clearRubble(r.id, true);
+    const fast = this.connections.rel.builder >= 70 ? 22 : 0;
+    for (const r of [...this.rubble]) if (day >= r.clearDay - (emergency ? 20 : 0) - fast) this.clearRubble(r.id, true);
     for (const b of this.buildings.values()) {
       if (b.damagedUntil && day >= b.damagedUntil - (emergency ? 45 : 0)) {
         b.damagedUntil = 0;
@@ -961,6 +996,430 @@ export class City {
     return report;
   }
 
+
+  // ---------- 交通（道路の制御） ----------
+  /** 一方通行を切り替える（なし → a→b → b→a → なし） */
+  cycleOneway(segId: number): string | null {
+    const blocked = this.blockedReason();
+    if (blocked) return blocked;
+    const s = this.net.segments.get(segId);
+    if (!s) return null;
+    s.oneway = s.oneway === 1 ? -1 : s.oneway === -1 ? 0 : 1;
+    this.versions.roads++;
+    this.trafficDirty = true;
+    this.rerouteLines();
+    return null;
+  }
+
+  setNodeControl(nodeId: number, control: NodeControl): string | null {
+    const blocked = this.blockedReason();
+    if (blocked) return blocked;
+    const n = this.net.nodes.get(nodeId);
+    if (!n) return null;
+    if (this.net.segmentsAt(nodeId).length < 3) return '3 本以上の道路が交わる交差点にしか設定できません';
+    const cost = Math.round(NODE_CONTROL_COST[control] * this.buildDiscount());
+    if ((n.control ?? 'auto') === control) return null;
+    if (cost > this.econ.money) return `資金が足りません（必要 ${formatYen(cost)}）`;
+    spend(this.econ, cost);
+    n.control = control;
+    this.versions.roads++;
+    this.trafficDirty = true;
+    return null;
+  }
+
+  refreshTraffic(): void {
+    this.crossings = findCrossings(this.transit, this.net);
+    this.riders = ridership(this.transit, this.buildings.values(), (id) => this.lineCongestion(id), (st) => this.stationBoost(st));
+    this.traffic = computeTraffic({
+      net: this.net, buildings: this.buildings.values(), region: this.region,
+      commuteOut: this.stats.commuteOut, commuteIn: this.stats.commuteIn, workers: this.stats.workers,
+      transitShare: this.riders.shareByBuilding, crossings: this.crossings,
+      staggered: decreeActive(this.policies, 'staggered', this.day),
+      priced: (b) => hasPolicy(this.policies, this.districts.at(b)?.id ?? 0, 'roadPricing'),
+    });
+    for (const l of this.transit.lines.values()) l.riders = this.riders.riders.get(l.id) ?? 0;
+    this.trafficDirty = false;
+    this.versions.traffic++;
+  }
+
+  /** バス・路面電車が走る道路の混み具合の平均 */
+  private lineCongestion(lineId: number): number {
+    const l = this.transit.lines.get(lineId);
+    if (!l || (l.mode !== 'bus' && l.mode !== 'tram') || !this.traffic.vc.size) return 0;
+    let sum = 0, n = 0;
+    for (const id of l.stops) {
+      const st = this.transit.stops.get(id);
+      if (st?.seg === undefined) continue;
+      sum += Math.min(2, this.traffic.vc.get(st.seg) ?? 0);
+      n++;
+    }
+    return n ? Math.max(0, sum / n - 0.5) : 0;
+  }
+
+  /** パークアンドライドの駐車場が近い駅は、使える範囲が広がる */
+  private stationBoost(st: Stop): number {
+    if (st.mode !== 'rail' && st.mode !== 'subway') return 1;
+    for (const f of this.facilities.values()) {
+      if (f.kind !== 'parkRide') continue;
+      if (Math.hypot(f.x - st.x, f.z - st.z) < 250) return 1.6;
+    }
+    return 1;
+  }
+
+  // ---------- 公共交通 ----------
+  private stopName(mode: TransitMode, p: P2): string {
+    const d = this.districts.at(p)?.name;
+    const base = d ?? ['本町', '中央', '市役所前', '緑町', '栄町', '旭町', '港町', '桜台', '松原', '若葉', '新町', '川端'][Math.floor(this.rand() * 12)];
+    const suffix = mode === 'bus' ? '' : mode === 'tram' ? '' : '駅';
+    let name = base + suffix;
+    const used = new Set([...this.transit.stops.values()].map((s) => s.name));
+    for (let k = 2; used.has(name); k++) name = `${base}${['東', '西', '南', '北', '中央', '本'][k % 6]}${suffix}`;
+    return name;
+  }
+
+  /** 停留所・駅を置けるか調べる。置ける場合は置く位置と費用 */
+  planStop(mode: TransitMode, p: P2, level: TrackLevel = 'ground', privately = false): { ok: boolean; reason?: string; cost: number; p: P2; reuse?: number; seg?: number; t?: number } {
+    const def = MODES[mode];
+    for (const st of this.transit.stops.values()) {
+      if (st.mode === mode && Math.hypot(st.x - p.x, st.z - p.z) < (mode === 'bus' || mode === 'tram' ? 20 : 60)) return { ok: true, cost: 0, p: st, reuse: st.id };
+    }
+    const blocked = this.blockedReason();
+    if (blocked) return { ok: false, reason: blocked, cost: 0, p };
+    let cost = Math.round(def.stopCost * (privately ? 0.3 : 1));
+    if (mode === 'bus' || mode === 'tram') {
+      const snap = snapStopToRoad(this.net, p, mode === 'tram');
+      if (!snap) return { ok: false, reason: mode === 'tram' ? '生活道路か幹線道路の上に置いてください（路地は不可）' : '道路の上に置いてください', cost, p };
+      if (cost > this.econ.money) return { ok: false, reason: `資金が足りません（必要 ${formatYen(cost)}）`, cost, p: snap.p };
+      return { ok: true, cost, p: snap.p, seg: snap.seg, t: snap.t };
+    }
+    if (!insideMapSafe(p)) return { ok: false, reason: '地図の外です', cost, p };
+    if (waterLevelAt(this.terrain, p.x, p.z) !== null) return { ok: false, reason: '水の上には駅を置けません', cost, p };
+    for (const st of this.transit.stops.values()) {
+      if ((st.mode === 'rail' || st.mode === 'subway') && Math.hypot(st.x - p.x, st.z - p.z) < 150) return { ok: false, reason: 'ほかの駅に近すぎます（150 m 以上離す）', cost, p };
+    }
+    cost = Math.round(cost * (level === 'elevated' ? 1.3 : 1));
+    if (cost > this.econ.money) return { ok: false, reason: `資金が足りません（必要 ${formatYen(cost)}）`, cost, p };
+    return { ok: true, cost, p };
+  }
+
+  /** 停留所・駅を置く（すでに近くにあればそれを使う）。id を返す */
+  addStop(mode: TransitMode, p: P2, level: TrackLevel = 'ground', privately = false): number | string {
+    const plan = this.planStop(mode, p, level, privately);
+    if (!plan.ok) return plan.reason ?? '置けません';
+    if (plan.reuse) return plan.reuse;
+    const id = this.transit.nextId++;
+    const h = Math.max(0, heightAt(this.terrain, plan.p.x, plan.p.z));
+    const lvl: TrackLevel = mode === 'subway' ? 'under' : mode === 'rail' ? level : 'ground';
+    this.transit.stops.set(id, {
+      id, mode, x: plan.p.x, z: plan.p.z, name: this.stopName(mode, plan.p), seg: plan.seg, t: plan.t, level: lvl,
+      y: lvl === 'elevated' ? h + 9 : mode === 'bus' || mode === 'tram' ? this.roadY(plan.seg!, plan.t!) : h,
+      private: privately || undefined,
+    } as Stop & { private?: boolean });
+    spend(this.econ, plan.cost);
+    this.versions.transit++;
+    if (mode === 'rail' || mode === 'subway') this.afterTransitChange();
+    return id;
+  }
+
+  private roadY(seg: number, t: number): number {
+    const s = this.net.segments.get(seg);
+    return s ? sampleProfileY(s.ys, t) : 0;
+  }
+
+  /** 2 つの駅を線路でつなぐ計画 */
+  planTrack(a: number, b: number, level: TrackLevel, privately = false): { ok: boolean; reason?: string; cost: number } {
+    const sa = this.transit.stops.get(a), sb = this.transit.stops.get(b);
+    if (!sa || !sb || sa.id === sb.id) return { ok: false, reason: '別の駅を選んでください', cost: 0 };
+    if (trackFor(this.transit, a, b)) return { ok: true, cost: 0 };
+    const mode = sa.mode as 'rail' | 'subway';
+    const lvl: TrackLevel = mode === 'subway' ? 'under' : level;
+    const prof = trackProfile(this.terrain, { p0: sa, c: { x: (sa.x + sb.x) / 2, z: (sa.z + sb.z) / 2 }, p2: sb }, lvl);
+    const cost = Math.round(trackCost(mode, lvl, prof.length) * this.buildDiscount() * (privately ? 0.3 : 1));
+    if (!prof.ok) return { ok: false, reason: prof.reason, cost };
+    if (prof.length > 3000) return { ok: false, reason: '駅と駅の間が長すぎます（3 km まで）', cost };
+    if (cost > this.econ.money) return { ok: false, reason: `資金が足りません（必要 ${formatYen(cost)}）`, cost };
+    return { ok: true, cost };
+  }
+
+  connectStops(a: number, b: number, level: TrackLevel, privately = false): string | null {
+    const plan = this.planTrack(a, b, level, privately);
+    if (!plan.ok) return plan.reason ?? '線路を引けません';
+    if (trackFor(this.transit, a, b)) return null;
+    const sa = this.transit.stops.get(a)!;
+    const mode = sa.mode as 'rail' | 'subway';
+    const lvl: TrackLevel = mode === 'subway' ? 'under' : level;
+    const cv = { p0: sa, c: { x: (sa.x + this.transit.stops.get(b)!.x) / 2, z: (sa.z + this.transit.stops.get(b)!.z) / 2 }, p2: this.transit.stops.get(b)! };
+    const prof = trackProfile(this.terrain, cv, lvl);
+    const id = this.transit.nextId++;
+    this.transit.tracks.set(id, { id, a, b, mode, level: lvl, ys: prof.ys, bridge: prof.bridge });
+    spend(this.econ, plan.cost);
+    if (lvl === 'ground') this.terrainChanges.push(flattenRoad(this.terrain, trackCurve(this.transit, this.transit.tracks.get(id)!), prof.ys, prof.bridge, 4));
+    this.afterTransitChange();
+    return null;
+  }
+
+  /** 路線をつくる。バス・路面電車は道路に沿って、鉄道・地下鉄は線路に沿って走る */
+  createLine(mode: TransitMode, stopIds: number[], operator: 'city' | 'private' = 'city'): Line | string {
+    if (stopIds.length < 2) return '停留所（駅）を 2 つ以上選んでください';
+    if (operator === 'private' && (mode !== 'rail' || this.connections.rel.rail < 40)) return '私鉄に任せられるのは、私鉄社長との関係が 40 以上のときの鉄道だけです';
+    const def = MODES[mode];
+    const id = this.transit.nextId++;
+    const same = [...this.transit.lines.values()].filter((l) => l.mode === mode);
+    const codes = 'MKTSHNAYCFGR';
+    const first = this.transit.stops.get(stopIds[0])!, last = this.transit.stops.get(stopIds.at(-1)!)!;
+    const baseName = (s: Stop) => s.name.replace(/駅$/, '');
+    const name = mode === 'bus' ? `市営バス ${same.length + 1} 系統`
+      : mode === 'tram' ? `路面電車 ${baseName(first)}線`
+      : operator === 'private' ? `瑞穂電鉄 ${baseName(first)}線` : mode === 'subway' ? `地下鉄 ${baseName(first)}線` : `${baseName(first)}${baseName(last)}線`;
+    const line: Line = {
+      id, mode, name, code: codes[[...this.transit.lines.values()].length % codes.length], color: def.colors[same.length % def.colors.length],
+      stops: stopIds.slice(), vehicles: def.vehicles, fare: def.fare, operator, path: [], pathLen: 0, broken: false, riders: 0, income: 0, cost: 0,
+    };
+    this.transit.lines.set(id, line);
+    this.routeLine(line);
+    if (line.broken) {
+      this.transit.lines.delete(id);
+      return mode === 'bus' || mode === 'tram' ? '停留所どうしが道路でつながっていません' : '駅どうしが線路でつながっていません';
+    }
+    this.say(`${line.name}が開業しました（${line.stops.map((sid) => this.transit.stops.get(sid)!.name).join('・')}）`, 'good');
+    if (operator === 'private') this.connections.rel.rail = Math.min(100, this.connections.rel.rail + 10);
+    this.versions.transit++;
+    this.trafficDirty = true;
+    return line;
+  }
+
+  private routeLine(l: Line): void {
+    const stops = l.stops.map((id) => this.transit.stops.get(id)).filter((s): s is Stop => !!s);
+    const r = l.mode === 'bus' || l.mode === 'tram' ? roadPath(this.net, stops, l.mode === 'tram') : trackPath(this.transit, stops);
+    l.path = r.path;
+    l.pathLen = polylineLen(r.path);
+    l.broken = !r.ok || stops.length < 2;
+  }
+
+  private rerouteLines(): void {
+    for (const l of this.transit.lines.values()) this.routeLine(l);
+    this.versions.transit++;
+  }
+
+  removeLine(id: number): void {
+    const l = this.transit.lines.get(id);
+    if (!l) return;
+    this.transit.lines.delete(id);
+    this.say(`${l.name}を廃止しました`, 'bad');
+    this.versions.transit++;
+    this.trafficDirty = true;
+  }
+
+  setLine(id: number, change: { vehicles?: number; fare?: number }): void {
+    const l = this.transit.lines.get(id);
+    if (!l || this.blockedReason()) return;
+    if (change.vehicles !== undefined) l.vehicles = Math.max(1, Math.min(40, Math.round(change.vehicles)));
+    if (change.fare !== undefined) l.fare = Math.max(0, Math.min(1000, Math.round(change.fare / 10) * 10));
+    this.versions.transit++;
+    this.trafficDirty = true;
+  }
+
+  /** 停留所・駅をなくす（使っている路線からも外す） */
+  removeStop(id: number): void {
+    const st = this.transit.stops.get(id);
+    if (!st) return;
+    this.transit.stops.delete(id);
+    for (const [tid, tr] of this.transit.tracks) if (tr.a === id || tr.b === id) this.transit.tracks.delete(tid);
+    for (const l of [...this.transit.lines.values()]) {
+      l.stops = l.stops.filter((s) => s !== id);
+      if (l.stops.length < 2) this.transit.lines.delete(l.id);
+    }
+    refund(this.econ, MODES[st.mode].stopCost * ROAD_REFUND);
+    this.rerouteLines();
+    if (st.mode === 'rail' || st.mode === 'subway') this.afterTransitChange();
+  }
+
+  /** 踏切をなくすため、地上の線路を高架にする */
+  elevateTrack(trackId: number): string | null {
+    const blocked = this.blockedReason();
+    if (blocked) return blocked;
+    const tr = this.transit.tracks.get(trackId);
+    if (!tr || tr.level !== 'ground') return null;
+    const prof = trackProfile(this.terrain, trackCurve(this.transit, tr), 'elevated');
+    if (!prof.ok) return prof.reason ?? '高架にできません';
+    const cost = Math.round((trackCost('rail', 'elevated', prof.length) - trackCost('rail', 'ground', prof.length)) * this.buildDiscount());
+    if (cost > this.econ.money) return `資金が足りません（必要 ${formatYen(cost)}）`;
+    spend(this.econ, cost);
+    tr.level = 'elevated';
+    tr.ys = prof.ys;
+    tr.bridge = prof.bridge;
+    this.say('連続立体交差事業が完了。線路が高架になり、踏切がなくなりました', 'good');
+    this.afterTransitChange();
+    return null;
+  }
+
+  elevateCost(trackId: number): number {
+    const tr = this.transit.tracks.get(trackId);
+    if (!tr) return 0;
+    const len = curveLength(trackCurve(this.transit, tr));
+    return Math.round((trackCost('rail', 'elevated', len) - trackCost('rail', 'ground', len)) * this.buildDiscount());
+  }
+
+  private afterTransitChange(): void {
+    // 線路や駅は、区画のマスと建物にとって障害物になる
+    this.afterRoadChange();
+    this.rerouteLines();
+    this.trafficDirty = true;
+  }
+
+  /** 道路が変わったら、バス停・電停を近くの道路に載せ直す */
+  private rehomeStops(): void {
+    for (const st of [...this.transit.stops.values()]) {
+      if (st.mode !== 'bus' && st.mode !== 'tram') continue;
+      const snap = snapStopToRoad(this.net, st, st.mode === 'tram');
+      if (!snap) { this.transit.stops.delete(st.id); continue; }
+      st.seg = snap.seg; st.t = snap.t; st.x = snap.p.x; st.z = snap.p.z;
+    }
+    for (const l of [...this.transit.lines.values()]) {
+      l.stops = l.stops.filter((id) => this.transit.stops.has(id));
+      if (l.stops.length < 2) { this.transit.lines.delete(l.id); continue; }
+      this.routeLine(l);
+    }
+    this.versions.transit++;
+  }
+
+  nearestStation(p: P2, within: number): (Stop & { private?: boolean }) | null {
+    let best: (Stop & { private?: boolean }) | null = null, bd = within;
+    for (const st of this.transit.stops.values()) {
+      if (st.mode !== 'rail' && st.mode !== 'subway') continue;
+      const d = Math.hypot(st.x - p.x, st.z - p.z);
+      if (d < bd) { bd = d; best = st; }
+    }
+    return best;
+  }
+
+  /** 月ごとの公共交通の収支 */
+  private transitMonth(): { income: number; cost: number } {
+    let income = 0, cost = 0;
+    const usedStops = new Set<number>();
+    for (const l of this.transit.lines.values()) {
+      const def = MODES[l.mode];
+      l.income = (l.riders * 2 * l.fare * 22) / 10_000;
+      l.cost = l.vehicles * def.vehicleUpkeep + l.stops.length * def.stopUpkeep;
+      if (l.operator === 'private') {
+        if (l.riders > 100) this.connections.rel.rail = Math.min(100, this.connections.rel.rail + 0.5);
+        continue;
+      }
+      income += l.income;
+      cost += l.cost;
+      for (const s of l.stops) usedStops.add(s);
+    }
+    // 路線に使われていない駅の維持費
+    for (const st of this.transit.stops.values()) if (!usedStops.has(st.id)) cost += MODES[st.mode].stopUpkeep;
+    return { income, cost };
+  }
+
+  // ---------- 関係者（コネ） ----------
+  npcAction(npc: NpcId, action: ActionId): string | null {
+    const blocked = this.blockedReason();
+    if (blocked) return blocked;
+    const a = ACTIONS[action], c = this.connections;
+    const key = `${npc}:${action}`;
+    if ((c.cooldowns[key] ?? 0) > this.day) return `次にできるのは ${Math.ceil((c.cooldowns[key] - this.day) / 30)} か月後です`;
+    if (a.cost > this.econ.money) return `資金が足りません（必要 ${formatYen(a.cost)}）`;
+    if (a.cost) spend(this.econ, a.cost, 'other');
+    c.rel[npc] = Math.min(100, c.rel[npc] + a.rel);
+    c.suspicion = Math.min(100, c.suspicion + a.suspicion * (npc === 'reporter' ? 1.5 : 1));
+    c.cooldowns[key] = this.day + a.cooldown;
+    if (action === 'favor') this.say(`市長が${NPCS[npc].title}の${NPCS[npc].name}氏に便宜を図ったとのうわさ`, 'politics');
+    this.versions.economy++;
+    return null;
+  }
+
+  answerRequest(npc: NpcId, accept: boolean): string | null {
+    const c = this.connections;
+    const req = c.requests.find((r) => r.npc === npc);
+    if (!req) return null;
+    if (!accept) {
+      c.requests = c.requests.filter((r) => r !== req);
+      c.rel[npc] = Math.max(0, c.rel[npc] - 5);
+      this.versions.economy++;
+      return null;
+    }
+    const blocked = this.blockedReason();
+    if (blocked) return blocked;
+    switch (req.kind) {
+      case 'stationCommercial': {
+        const st = [...this.transit.stops.values()].find((s) => s.mode === 'rail');
+        if (!st) return '鉄道の駅がまだありません';
+        this.paintZone(st, 120, 4);
+        c.rel.rail += 15; c.suspicion += 4;
+        break;
+      }
+      case 'publicWorks':
+        if (this.econ.money < 10_000) return '資金が足りません（必要 1億円）';
+        spend(this.econ, 10_000);
+        c.rel.builder += 18; c.suspicion += 8;
+        break;
+      case 'drill':
+        if (this.econ.money < 500) return '資金が足りません';
+        spend(this.econ, 500, 'other');
+        c.rel.governor += 12;
+        addModifier(this.politics, 'tradition', 3, this.day + 360, '防災訓練');
+        break;
+      case 'bizTax':
+        setTax(this.econ, 'biz', this.econ.taxes.biz - 1);
+        c.rel.chamber += 15;
+        break;
+      case 'disclosure':
+        c.rel.reporter += 10; c.suspicion = Math.max(0, c.suspicion - 10);
+        addModifier(this.politics, 'business', -3, this.day + 360, '情報公開');
+        break;
+    }
+    for (const k of Object.keys(c.rel) as NpcId[]) c.rel[k] = Math.min(100, c.rel[k]);
+    c.suspicion = Math.min(100, c.suspicion);
+    c.requests = c.requests.filter((r) => r !== req);
+    this.versions.economy++;
+    this.recount();
+    return null;
+  }
+
+  private connectionsMonth(day: number): void {
+    const c = this.connections;
+    c.suspicion = Math.max(0, c.suspicion - 1);
+    c.requests = c.requests.filter((r) => r.expires > day);
+    // 陳情が届く
+    if (this.rand() < 0.15) {
+      const ids = (Object.keys(NPCS) as NpcId[]).filter((id) => !c.requests.some((r) => r.npc === id));
+      if (ids.length) {
+        const npc = ids[Math.floor(this.rand() * ids.length)];
+        c.requests.push({ npc, kind: REQUESTS[npc].kind, text: REQUESTS[npc].text, expires: day + 90 });
+        this.say(`${NPCS[npc].title}の${NPCS[npc].name}氏から陳情が届きました`, 'politics');
+      }
+    }
+    // スクープ
+    if (c.suspicion > 40) {
+      const p = ((c.suspicion - 40) / 200) * (c.rel.reporter >= 50 ? 0.5 : 1);
+      if (this.rand() < p) {
+        c.scoops++;
+        c.suspicion = Math.max(0, c.suspicion - 20);
+        addModifier(this.politics, 'all', -8, day + 360, 'スクープ');
+        this.say('【スクープ】地元紙が市長と業界の癒着疑惑を報道。支持率が急落', 'bad');
+      }
+    }
+    // リコール
+    if (c.suspicion >= 90 && !c.recallDay && this.politics.mayor === 'player') {
+      c.recallDay = day + 60;
+      this.say('市民団体がリコールの署名を集め始めました。2 か月後に住民投票（出直し選挙）です', 'bad');
+    }
+    if (c.recallDay && day >= c.recallDay) {
+      c.recallDay = 0;
+      this.say('リコールによる出直し市長選挙が行われます', 'politics');
+      this.election(this.year);
+    }
+    // 県の特別補助金
+    if (c.rel.governor >= 70 && c.lastGrantYear !== this.year) {
+      c.lastGrantYear = this.year;
+      refund(this.econ, 10_000);
+      this.say('県知事から 1 億円の特別補助金が届きました', 'good');
+    }
+  }
+
   // ---------- 政策と布告 ----------
   togglePolicy(districtId: number, id: PolicyId): boolean {
     if (this.blockedReason()) return false;
@@ -1046,6 +1505,8 @@ export class City {
       for (const id of list) for (const [f, v] of Object.entries(POLICIES[id].faction ?? {})) add(f as FactionId, (v as number) * Math.max(0.3, share));
     }
     if (decreeActive(this.policies, 'powerSaving', day)) add('business', -6);
+    if (decreeActive(this.policies, 'staggered', day)) add('business', -3);
+    add('business', -this.traffic.congestion * 12 + Math.max(0, this.connections.rel.chamber - 30) / 8);
     if (decreeActive(this.policies, 'curfew', day)) add('progress', -15);
     return extra;
   }
@@ -1080,7 +1541,8 @@ export class City {
     const smoke = (this.policies.districts[0] ?? []).includes('noSmoking') ? 1 : 0;
     const curfew = decreeActive(this.policies, 'curfew', this.day) ? -3 : 0;
     const saving = decreeActive(this.policies, 'powerSaving', this.day) ? -2 : 0;
-    const happiness = clamp01(base - unemployment * 100 - (t.res - DEFAULT_TAXES.res) * 2.5 - (this.econ.bankrupt ? 15 : 0) + festival + smoke + curfew + saving);
+    const commutePenalty = Math.max(0, this.traffic.avgCommute - 18) * 0.5;
+    const happiness = clamp01(base - commutePenalty - unemployment * 100 - (t.res - DEFAULT_TAXES.res) * 2.5 - (this.econ.bankrupt ? 15 : 0) + festival + smoke + curfew + saving);
     const connected = this.region.neighbors.some((n) => n.connected);
     this.stats = {
       population, comJobs, indJobs, buildings: this.buildings.size,
@@ -1088,7 +1550,7 @@ export class City {
       commuteCapacity: capacity, happiness, pollution,
       oldSeismicShare: this.buildings.size ? oldSeismic / this.buildings.size : 0,
       demand: {
-        res: clamp(45 + (jobs + Math.min(capacity, 400) - workers) * 0.35 - (t.res - 10) * 3 + (happiness - 55) * 0.4),
+        res: clamp(45 + (jobs + Math.min(capacity, 400) - workers) * 0.35 - (t.res - 10) * 3 + (happiness - 55) * 0.4 - commutePenalty),
         com: clamp(20 + (population * 0.18 - comJobs) * 0.9 - (t.biz - 10) * 3 - shortage * 0.15 - ((this.policies.districts[0] ?? []).includes('landscape') ? 3 : 0)),
         ind: clamp(25 + (population * 0.25 + (connected ? 120 : 0) - indJobs) * 0.7 - (t.biz - 10) * 3 - shortage * 0.15),
       },
@@ -1146,6 +1608,13 @@ export class City {
       rubble: this.rubble.map((r) => ({ ...r })),
       policies: structuredClone(this.policies),
       quakes: this.quakes.slice(),
+      transit: {
+        stops: [...this.transit.stops.values()].map((x) => ({ ...x })),
+        tracks: [...this.transit.tracks.values()].map((x) => ({ ...x })),
+        lines: [...this.transit.lines.values()].map((x) => ({ ...x, path: [] })),
+        nextId: this.transit.nextId,
+      },
+      connections: structuredClone(this.connections),
     };
   }
 
@@ -1153,7 +1622,19 @@ export class City {
   load(data: CityData, day: number): void {
     this.net.load(data.roads);
     for (const id of [...this.net.segments.keys()].sort((a, b) => a - b)) this.flatten(id);
-    this.cells = generateCells(this.net, this.terrain, new Map());
+    if (data.transit) {
+      this.transit = {
+        stops: new Map(data.transit.stops.map((x) => [x.id, { ...x }])),
+        tracks: new Map(data.transit.tracks.map((x) => [x.id, { ...x }])),
+        lines: new Map(data.transit.lines.map((x) => [x.id, { ...x }])),
+        nextId: data.transit.nextId,
+      };
+      for (const tr of this.transit.tracks.values()) {
+        if (tr.level === 'ground') this.terrainChanges.push(flattenRoad(this.terrain, trackCurve(this.transit, tr), tr.ys, tr.bridge, 4));
+      }
+    }
+    if (data.connections) this.connections = structuredClone(data.connections);
+    this.cells = generateCells(this.net, this.terrain, new Map(), transitObstacles(this.transit));
     const idx = this.cellIndex();
     for (let k = 0; k < data.zones.length; k += 3) {
       const c = this.findCell(idx, data.zones[k], data.zones[k + 1]);
@@ -1181,8 +1662,29 @@ export class City {
     this.day = Math.floor(day);
     updateConnections(this.region, this.net);
     this.refreshServices();
+    this.rerouteLines();
+    this.refreshTraffic();
     for (const k of Object.keys(this.versions) as (keyof typeof this.versions)[]) this.versions[k]++;
     this.recount();
     this.lastJobs = this.stats.comJobs + this.stats.indJobs;
   }
 }
+
+function insideMapSafe(p: P2): boolean {
+  return Math.abs(p.x) < 1000 && Math.abs(p.z) < 1000;
+}
+
+function sampleProfileY(arr: number[], t: number): number {
+  const n = arr.length - 1;
+  const f = Math.min(n, Math.max(0, t * n));
+  const i = Math.min(n - 1, Math.floor(f));
+  return arr[i] + (arr[i + 1] - arr[i]) * (f - i);
+}
+
+function polylineLen(pts: P2[]): number {
+  let l = 0;
+  for (let i = 1; i < pts.length; i++) l += Math.hypot(pts[i].x - pts[i - 1].x, pts[i].z - pts[i - 1].z);
+  return l;
+}
+
+
