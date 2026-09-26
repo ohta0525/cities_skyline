@@ -11,7 +11,7 @@ import type { Quality } from '../core/settings';
 import { BASE_Y, SEA_LEVEL, heightAt, insideMap, type Terrain } from '../world/terrain';
 import { CameraController } from './camera';
 import { buildDiorama, buildNameplate } from './diorama';
-import { buildTerrainMesh, updateTerrainRegion } from './terrainMesh';
+import { buildTerrainMesh, setTerritory, updateTerrainRegion } from './terrainMesh';
 import { buildTrees, clearTrees } from './trees';
 import { buildRiver, buildSea, createWaterMaterial } from './water';
 
@@ -94,6 +94,7 @@ export class World3D {
     this.disposeGroup(this.worldGroup);
     this.worldGroup.clear();
     this.terrainMesh = buildTerrainMesh(t);
+    setTerritory(this.terrainMesh, this.territory);
     this.worldGroup.add(this.terrainMesh);
     this.worldGroup.add(buildSea(t, this.water.material));
     const river = buildRiver(t, this.water.material);
@@ -102,6 +103,13 @@ export class World3D {
     this.trees = buildTrees(t, QUALITY[this.quality].trees);
     this.worldGroup.add(this.trees);
     this.terrainEpoch++;
+  }
+
+  private territory = { west: true, east: true, north: true };
+  /** 隣町の土地の表示（合併すると消える） */
+  setTerritory(other: { west: boolean; east: boolean; north: boolean }): void {
+    this.territory = { ...other };
+    if (this.terrainMesh) setTerritory(this.terrainMesh, other);
   }
 
   updateTerrain(r: { i0: number; i1: number; j0: number; j1: number }): void {

@@ -287,3 +287,39 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
 .alertbar .alert-text span { color: #d9d0e0; font-size: 12px; }
 .alertbar button { flex: 0 0 auto; background: #e0413a; color: #fff; border: 0; border-radius: 8px; padding: 8px 14px; font-weight: 700; cursor: pointer; }
 .alertbar button.on { background: var(--raised); border: 1px solid var(--line); }
+
+/* P6：外交と防衛 */
+.cityhall .request { background: rgba(242, 177, 52, .12); border: 1px solid rgba(242, 177, 52, .5); border-radius: 8px; padding: 8px 10px; margin: 8px 0; font-size: 13px; line-height: 1.6; }
+.cityhall .stepper { display: inline-flex; align-items: center; gap: 4px; }
+.cityhall .stepper button { background: var(--raised); border: 1px solid var(--line); border-radius: 5px; width: 26px; height: 24px; cursor: pointer; }
+.cityhall .stepper b.neg { color: #ffb3a5; }
+.cityhall .row.wrap { margin-top: 6px; }
+.cityhall .row button:disabled, .cityhall .chips button:disabled, .cityhall .stepper button:disabled { opacity: .45; cursor: not-allowed; }
+.cityhall .row button.danger { margin-top: 0; }
+.neighbor.tense { background: linear-gradient(90deg, rgba(217, 87, 63, .12), transparent 70%); }
+.neighbor.merged { opacity: .75; }
+.chips.treaties button { font-size: 12px !important; padding: 3px 8px !important; }
+.warbox { border: 1px solid #a3263a; background: rgba(163, 38, 58, .14); border-radius: 10px; padding: 10px 12px; margin-bottom: 12px; }
+.warbox > b { font-size: 15px; }
+.warbox .policy-row { margin-top: 6px; }
+.labels .neighbor-label {
+  font-size: 13px; letter-spacing: .08em; padding: 3px 10px; border-radius: 999px;
+  background: rgba(20, 24, 28, .55); border: 1px dashed rgba(255, 255, 255, .6); color: #f3f1ea;
+}
+.labels .neighbor-label[data-stage="2"] { border-color: #e8b83e; color: #ffe39a; }
+.labels .neighbor-label[data-stage="3"] { border-color: #e8873e; color: #ffc49a; }
+.labels .neighbor-label[data-stage="4"], .labels .neighbor-label[data-stage="5"] { border: 1px solid #ff6b57; color: #ffb3a5; background: rgba(90, 16, 20, .65); }
+.warbar {
+  position: absolute; top: 122px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 12px;
+  max-width: min(760px, calc(100% - 32px)); padding: 8px 12px; border-radius: 10px;
+  background: rgba(30, 14, 16, .93); border: 1px solid #c2394a; color: #fff;
+}
+.warbar .lv { flex: 0 0 auto; display: grid; place-items: center; width: 34px; height: 34px; border-radius: 6px; background: #a3263a; font-size: 18px; }
+.warbar .alert-text { display: flex; flex-direction: column; gap: 2px; font-size: 13px; line-height: 1.4; }
+.warbar .alert-text span { color: #e6cfd2; font-size: 12px; }
+.warbar .front { position: relative; flex: 0 0 120px; height: 8px; border-radius: 4px; background: rgba(255, 255, 255, .15); overflow: hidden; }
+.warbar .front::after { content: ''; position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background: rgba(255, 255, 255, .6); }
+.warbar .front i { position: absolute; top: 0; bottom: 0; }
+.warbar button { flex: 0 0 auto; background: var(--raised); color: #fff; border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; cursor: pointer; }
+@media (max-width: 720px) { .warbar .front { display: none; } }
+.warbar, .alertbar { z-index: 6; }

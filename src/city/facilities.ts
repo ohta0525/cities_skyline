@@ -1,9 +1,9 @@
 import type { FactionId } from './politics';
 
-export type FacilityCategory = 'power' | 'water' | 'garbage' | 'fire' | 'police' | 'health' | 'education' | 'leisure' | 'transport' | 'disaster';
+export type FacilityCategory = 'power' | 'water' | 'garbage' | 'fire' | 'police' | 'health' | 'education' | 'leisure' | 'transport' | 'disaster' | 'defense';
 
 export const CATEGORY_NAMES: Record<FacilityCategory, string> = {
-  power: '電気', water: '上下水道', garbage: 'ゴミ', fire: '消防', police: '警察', health: '医療', education: '教育', leisure: '公園・文化', transport: '交通', disaster: '防災',
+  power: '電気', water: '上下水道', garbage: 'ゴミ', fire: '消防', police: '警察', health: '医療', education: '教育', leisure: '公園・文化', transport: '交通', disaster: '防災', defense: '防衛',
 };
 
 export type FacilityKind =
@@ -16,7 +16,8 @@ export type FacilityKind =
   | 'elementary' | 'highschool'
   | 'park' | 'shrine'
   | 'parkRide'
-  | 'retention' | 'discharge' | 'sabo' | 'evacTower' | 'disasterPark' | 'tempHousing' | 'garrison';
+  | 'retention' | 'discharge' | 'sabo' | 'evacTower' | 'disasterPark' | 'tempHousing'
+  | 'garrison' | 'training' | 'coastwatch' | 'airbase' | 'armsFactory' | 'nationalBase';
 
 export interface FacilityDef {
   name: string;
@@ -51,6 +52,14 @@ export interface FacilityDef {
   shelter?: number;
   /** 仮設住宅に住める人数 */
   housing?: number;
+  /** 騒音：周りの満足度を下げる [強さ, 半径 m] */
+  noise?: [number, number];
+  /** 月の収入（万円）。隣町とつながっているときだけ */
+  income?: number;
+  /** 国からの交付金（万円／月） */
+  grant?: number;
+  /** 市に 1 つだけ */
+  unique?: boolean;
   note: string;
 }
 
@@ -76,7 +85,12 @@ export const FACILITIES: Record<FacilityKind, FacilityDef> = {
   evacTower: { name: '津波避難タワー', cat: 'disaster', w: 1, d: 1, cost: 4_000, upkeep: 20, radius: 400, shelter: 500, note: '近く（400 m）の人が津波から逃げ込める' },
   disasterPark: { name: '防災公園', cat: 'disaster', w: 2, d: 3, cost: 3_000, upkeep: 60, radius: 200, happiness: 5, shelter: 1_500, note: '災害時は避難所になり、火の燃え広がりも防ぐ' },
   tempHousing: { name: '仮設住宅', cat: 'disaster', w: 2, d: 2, cost: 2_500, upkeep: 50, housing: 200, note: '家を失った人が住める（200 人）' },
-  garrison: { name: '防衛隊駐屯地', cat: 'disaster', w: 4, d: 4, cost: 150_000, upkeep: 1_500, faction: { id: 'defense', amount: 8 }, note: '災害派遣を要請できる。救助とがれきの片付けが速くなる' },
+  garrison: { name: '防衛隊駐屯地', cat: 'defense', w: 4, d: 4, cost: 150_000, upkeep: 1_500, faction: { id: 'defense', amount: 8 }, note: '部隊を 6 つまで置ける。災害派遣を要請でき、救助とがれきの片付けが速くなる' },
+  training: { name: '訓練場', cat: 'defense', w: 3, d: 4, cost: 20_000, upkeep: 300, noise: [4, 300], faction: { id: 'defense', amount: 3 }, note: '部隊の力が 1.25 倍になる。射撃の音で周りの満足度が少し下がる' },
+  coastwatch: { name: '沿岸監視所', cat: 'defense', w: 1, d: 2, cost: 6_000, upkeep: 80, needsWater: true, note: '艦艇を置けるようになる。津波の見張りで逃げ遅れが 2 割減る' },
+  airbase: { name: '航空基地', cat: 'defense', w: 4, d: 4, cost: 120_000, upkeep: 1_500, unlockYear: 41, noise: [8, 500], unique: true, faction: { id: 'green', amount: -4 }, note: '発展期から。航空隊を置けるようになり、紛争での街の被害が半分になる。騒音が大きい' },
+  armsFactory: { name: '兵器工場', cat: 'defense', w: 3, d: 3, cost: 40_000, upkeep: 200, income: 1_500, pollution: 70, faction: { id: 'defense', amount: 3 }, note: '隣町とつながっていれば輸出で月 1,500万円。部隊の編成費が 2 割安くなる。環境派と革新派が嫌う' },
+  nationalBase: { name: '中央政府の基地（誘致）', cat: 'defense', w: 4, d: 4, cost: 0, upkeep: 0, grant: 2_500, noise: [8, 500], unique: true, faction: { id: 'progress', amount: -6 }, note: '国から月 2,500万円の交付金。攻められたとき国の部隊が守る。騒音と反対運動が起きる' },
   parkRide: { name: '駐車場（パークアンドライド）', cat: 'transport', w: 2, d: 2, cost: 1_200, upkeep: 30, radius: 250, note: '近く（250 m）の駅まで車で来て電車に乗り換えられる。駅を使える範囲が 1.6 倍に' },
   shrine: { name: '神社', cat: 'leisure', w: 1, d: 2, cost: 1_500, upkeep: 20, radius: 260, happiness: 4, faction: { id: 'tradition', amount: 3 }, note: '鎮守の森。保守・伝統派が喜ぶ' },
 };

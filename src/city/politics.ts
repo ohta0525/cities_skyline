@@ -14,7 +14,7 @@ export const FACTIONS: Faction[] = [
   { id: 'tradition', name: '保守・伝統', leader: '町内会長', wants: '低い町並み、安定した財政', color: '#8c6d4f' },
   { id: 'progress', name: '革新', leader: '市民団体代表', wants: '暮らしの満足度、公約を守る市政', color: '#4f8fd9' },
   { id: 'green', name: '環境', leader: '環境団体代表', wants: '公害を減らす、緑を残す', color: '#3ea865' },
-  { id: 'defense', name: '防衛', leader: '防衛隊司令', wants: '健全な財政と備え（防衛隊は P6 で登場）', color: '#6b7a8f' },
+  { id: 'defense', name: '防衛', leader: '防衛隊司令', wants: '防衛隊の備え、隣町に弱腰にならない外交', color: '#6b7a8f' },
 ];
 
 export type AiMayorType = 'doken' | 'eco' | 'populist' | 'hawk';

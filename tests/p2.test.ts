@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { City } from '../src/city/city';
 import { generateTerrain, HALF, MAP_SIZE } from '../src/world/terrain';
+import { BORDER } from '../src/city/region';
 import type { Snap } from '../src/city/roads';
 
 const free = (x: number, z: number): Snap => ({ kind: 'free', p: { x, z } });
@@ -58,17 +59,17 @@ describe('P2：経済と住民', () => {
     expect(city.stats.demand.com).toBeGreaterThan(20);
   });
 
-  it('地図の端まで道路を引くと隣町につながり、通勤が始まる', () => {
+  it('市の境界まで道路を引くと隣町につながり、通勤が始まる', () => {
     const { city, o } = setup();
     city.paintZone(o, 200, 1);
     city.advanceTo(60);
     expect(city.region.neighbors.every((n) => !n.connected)).toBe(true);
-    // 西の端まで、何本かに分けて道路を延ばす
+    // 西の境界まで、何本かに分けて道路を延ばす
     let x = o.x - 150;
     let start: Snap = city.snap({ x, z: o.z });
     let guard = 0;
-    while (x > -HALF + 30 && guard++ < 40) {
-      const nx = Math.max(-HALF + 20, x - 160);
+    while (x > -BORDER + 20 && guard++ < 40) {
+      const nx = Math.max(-BORDER + 8, x - 160);
       const plan = city.planRoad(start, free(nx, o.z), null, 'local');
       if (!plan.ok) break;
       city.buildRoad(plan);

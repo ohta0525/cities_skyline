@@ -92,6 +92,14 @@
       </div>
     </fieldset>
     <fieldset>
+      <legend>紛争・戦争</legend>
+      <div class="seg" role="radiogroup">
+        <label><input type="radio" name="war" id="warOn" value="on"><span>起こる</span></label>
+        <label><input type="radio" name="war" id="warOff" value="off"><span>起こらない（平和モード）</span></label>
+      </div>
+      <p class="note">平和モードでは、緊張は「境界の封鎖」までしか上がらず、紛争になりません。</p>
+    </fieldset>
+    <fieldset>
       <legend>新しい街</legend>
       <p class="note">新しい地形を生成して、1 年目からやり直します。今の街は保存しない限り消えます。</p>
       <button id="btnNew" class="danger">新しい街を始める</button>
@@ -123,11 +131,18 @@
       <li>「公共交通」で停留所や駅を順にクリックして Enter で路線ができます。「交通」で一方通行・右折レーン・立体交差・踏切の高架化ができます</li>
       <li>左の「関係者」で私鉄社長や建設会社社長と関係を深めると見返りがあります（疑惑度に注意）</li>
       <li>台風や大雨の予報が出たら、上の警報の帯から「避難指示」を出せます。「防災」で堤防・防潮堤を高くし、「施設」の防災から避難タワーや仮設住宅を建てます</li>
+      <li>左の「地域」で隣町と協定を結び、ふるさと納税の返礼品を決め、合併を申し入れられます。関係が悪いと緊張が高まり、封鎖や紛争になります。「防衛」で部隊を編成できます</li>
       <li>4 年ごとに市長選挙があります。「政治」で派閥の支持を見ながら、公約を掲げて再選を目指します</li>
     </ol>
   </aside>
 
   <button id="ticker" class="ticker" title="新聞を開く"><b>地元紙</b><span id="tickerText"></span></button>
+  <div id="warbar" class="warbar" hidden>
+    <span class="lv">⚔</span>
+    <div class="alert-text"><b id="warTitle"></b><span id="warDetail"></span></div>
+    <span class="front"><i id="warFront"></i></span>
+    <button id="btnWar">防衛パネル</button>
+  </div>
   <div id="alert" class="alertbar" hidden>
     <span id="alertLevel" class="lv">3</span>
     <div class="alert-text"><b id="alertTitle"></b><span id="alertDetail"></span></div>
@@ -138,7 +153,8 @@
     <button data-panel="finance" aria-pressed="false">財政</button>
     <button data-panel="people" aria-pressed="false">住民</button>
     <button data-panel="politics" aria-pressed="false">政治<i id="politicsBadge" class="badge" hidden></i></button>
-    <button data-panel="region" aria-pressed="false">地域</button>
+    <button data-panel="region" aria-pressed="false">地域<i id="regionBadge" class="badge" hidden></i></button>
+    <button data-panel="defense" aria-pressed="false">防衛<i id="defenseBadge" class="badge" hidden></i></button>
     <button data-panel="transport" aria-pressed="false">交通</button>
     <button data-panel="npc" aria-pressed="false">関係者<i id="npcBadge" class="badge" hidden></i></button>
     <button data-panel="policy" aria-pressed="false">政策</button>

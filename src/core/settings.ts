@@ -9,11 +9,13 @@ export interface Settings {
   miniature: number;
   helpSeen: boolean;
   disasters: boolean;
+  /** 紛争・戦争が起こるか（false で平和モード） */
+  war: boolean;
 }
 
 const KEY = 'mizuho-city/settings';
 
-export const DEFAULT_SETTINGS: Settings = { yearMinutes: 15, quality: 'high', miniature: 0.6, helpSeen: false, disasters: true };
+export const DEFAULT_SETTINGS: Settings = { yearMinutes: 15, quality: 'high', miniature: 0.6, helpSeen: false, disasters: true, war: true };
 
 export function loadSettings(): Settings {
   try {
@@ -26,6 +28,7 @@ export function loadSettings(): Settings {
       miniature: typeof o.miniature === 'number' ? Math.min(1, Math.max(0, o.miniature)) : DEFAULT_SETTINGS.miniature,
       helpSeen: o.helpSeen === true,
       disasters: o.disasters !== false,
+      war: o.war !== false,
     };
   } catch {
     return { ...DEFAULT_SETTINGS };

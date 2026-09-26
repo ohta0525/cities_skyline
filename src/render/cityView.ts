@@ -12,6 +12,7 @@ import { HAZARD_MODES, TINTS, buildHazardOverlay, type InfoMode, type Tint } fro
 import { FACILITIES, type FacilityCategory } from '../city/facilities';
 import { Vehicles, buildTransitStatic, pathY } from './transitView';
 import { Rain, buildDefenses, buildFloodWater } from './waterView';
+import { WarView } from './warView';
 
 export type Pickable = { kind: 'building' | 'facility'; id: number };
 import type { World3D } from './world3d';
@@ -58,7 +59,9 @@ export class CityView {
   private defenseMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.95 });
   private floodMesh?: THREE.Mesh;
   private seenWater = '';
+  private seenTerritory = -1;
   readonly rain = new Rain();
+  readonly war = new WarView();
   /** 0〜1。嵐のときの空の暗さ */
   weather = 0;
   private infoSeen = '';
@@ -73,7 +76,7 @@ export class CityView {
     this.group.add(this.buildingGroup, this.facilityGroup, this.rubbleGroup, this.fire.group, this.icons, this.rings, this.zones.zoned, this.zones.grid, this.districts.mesh, this.highlightMesh);
     this.icons.renderOrder = 20;
     this.vehicles = new Vehicles(this.buildingMat);
-    this.group.add(this.transitStatic, this.vehicles.group, this.overlay, this.rain.lines);
+    this.group.add(this.transitStatic, this.vehicles.group, this.overlay, this.rain.lines, this.war.group);
     this.highlightMesh.renderOrder = 11;
     this.highlightMesh.visible = false;
     world.scene.add(this.group);
@@ -87,6 +90,7 @@ export class CityView {
     for (const m of this.facilities.values()) { this.facilityGroup.remove(m); m.geometry.dispose(); }
     this.facilities.clear();
     this.infoSeen = '';
+    this.seenTerritory = -1;
   }
 
   /** 毎フレーム呼ぶ */
@@ -132,6 +136,13 @@ export class CityView {
       this.transitStatic.add(buildTransitStatic(c, this.buildingMat));
       this.vehicles.syncTransit(c);
       this.seenTransit = tKey;
+    }
+    // 紛争と市の境界
+    this.war.sync(c);
+    if (v.territory !== this.seenTerritory) {
+      this.seenTerritory = v.territory;
+      const other = (e: 'west' | 'east' | 'north') => !c.region.neighbors.find((n) => n.edge === e)?.merged;
+      this.world.setTerritory({ west: other('west'), east: other('east'), north: other('north') });
     }
     // 堤防・防潮堤・浸水
     const wKey = `${v.water}:${this.world.terrainEpoch}:${Math.floor(day)}`;
@@ -215,6 +226,7 @@ export class CityView {
     this.fire.update(time);
     this.vehicles.update(dt);
     this.rain.update(Math.min(0.1, dt || 0.016), this.world.controls.target, this.weather);
+    this.war.update(time, Math.min(0.1, dt));
   }
 
   private place(m: THREE.Mesh, o: { ax: number; az: number; nx: number; nz: number; x: number; y: number; z: number }): void {

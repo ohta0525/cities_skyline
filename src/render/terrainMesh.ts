@@ -3,6 +3,8 @@ import { smoothstep } from '../core/noise';
 import { CELL, GRID, HALF, type Terrain } from '../world/terrain';
 
 const N = GRID + 1;
+/** 市の境界（city/region.ts の BORDER と同じ） */
+const BORDER_M = 620;
 
 const COL = {
   seabedShallow: new THREE.Color('#d2c190'),
@@ -63,6 +65,37 @@ export function buildTerrainMesh(t: Terrain): THREE.Mesh {
   geo.computeVertexNormals();
   geo.computeBoundingSphere();
   const mat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.95, metalness: 0, flatShading: true });
+  // 隣町の土地は少しくすませ、市の境界に白い点線を描く
+  const territory = { uBorder: { value: BORDER_M }, uOther: { value: new THREE.Vector3(1, 1, 1) } };
+  mat.onBeforeCompile = (sh) => {
+    Object.assign(sh.uniforms, territory);
+    sh.vertexShader = sh.vertexShader
+      .replace('#include <common>', '#include <common>\nvarying vec3 vTerrWorld;')
+      .replace('#include <worldpos_vertex>', '#include <worldpos_vertex>\nvTerrWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;');
+    sh.fragmentShader = sh.fragmentShader
+      .replace('#include <common>', '#include <common>\nvarying vec3 vTerrWorld;\nuniform float uBorder;\nuniform vec3 uOther;')
+      .replace('#include <color_fragment>', `#include <color_fragment>
+        {
+          float x = vTerrWorld.x, z = vTerrWorld.z, B = uBorder;
+          float other = 0.0;
+          if (x < -B) other = uOther.x;
+          else if (x > B) other = uOther.y;
+          else if (z < -B) other = uOther.z;
+          if (other > 0.5) {
+            float l = dot(diffuseColor.rgb, vec3(0.3, 0.55, 0.15));
+            diffuseColor.rgb = mix(diffuseColor.rgb, vec3(l) * vec3(1.0, 0.97, 0.92), 0.5) * 0.88;
+          }
+          // 境界線（隣町が残っている辺だけ）
+          float d = 1e5; float along = 0.0;
+          if (uOther.x > 0.5 && z > -1100.0) { float e = abs(x + B); if (e < d) { d = e; along = z; } }
+          if (uOther.y > 0.5 && z > -1100.0) { float e = abs(x - B); if (e < d) { d = e; along = z; } }
+          if (uOther.z > 0.5 && abs(x) < B) { float e = abs(z + B); if (e < d) { d = e; along = x; } }
+          float dash = step(0.45, fract(along / 18.0));
+          float line = (1.0 - smoothstep(1.6, 2.6, d)) * dash;
+          diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.98, 0.97, 0.93), line * 0.9);
+        }`);
+  };
+  mat.userData.territory = territory;
   const mesh = new THREE.Mesh(geo, mat);
   mesh.receiveShadow = true;
   mesh.castShadow = true;
@@ -113,4 +146,10 @@ export function updateTerrainRegion(mesh: THREE.Mesh, t: Terrain, r: { i0: numbe
   pos.needsUpdate = true;
   col.needsUpdate = true;
   mesh.geometry.computeBoundingSphere();
+}
+
+/** どの辺の土地がまだ隣町のものか（true = 隣町） */
+export function setTerritory(mesh: THREE.Mesh, other: { west: boolean; east: boolean; north: boolean }): void {
+  const t = (mesh.material as THREE.MeshStandardMaterial).userData.territory as { uOther: { value: THREE.Vector3 } } | undefined;
+  t?.uOther.value.set(other.west ? 1 : 0, other.east ? 1 : 0, other.north ? 1 : 0);
 }

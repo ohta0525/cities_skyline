@@ -18,6 +18,8 @@ import { Panels } from './ui/panels';
 import { formatYen } from './city/economy';
 import { RANKS, eraOf, yearOf } from './city/eras';
 import { AI_MAYORS, FACTIONS, PLEDGES, type PledgeId } from './city/politics';
+import { VICTORY, type VictoryChoice } from './city/defense';
+import { BORDER, EDGE_NAMES, STAGE_NAMES, stageOf } from './city/region';
 import type { ElectionResult } from './city/politics';
 import * as THREE from 'three';
 import { MONTH_DAYS, YEAR_DAYS, dateOf, formatDate, seasonOf, type Speed, type YearMinutes } from './sim/clock';
@@ -66,6 +68,7 @@ function startCity(save: SaveData): void {
   city = new City(terrain, save.terrain.seed);
   city.load(save.city, save.sim.day);
   city.disastersEnabled = settings.disasters;
+  city.warEnabled = settings.war;
   world.setTerrain(terrain);
   view.setCity(city);
   tools.setCity(city);
@@ -260,6 +263,14 @@ document.querySelectorAll<HTMLInputElement>('input[name="disasters"]').forEach((
     city.disastersEnabled = settings.disasters;
   };
 });
+$<HTMLInputElement>(settings.war ? 'warOn' : 'warOff').checked = true;
+document.querySelectorAll<HTMLInputElement>('input[name="war"]').forEach((r) => {
+  r.onchange = () => {
+    settings.war = r.value === 'on';
+    saveSettings(settings);
+    city.warEnabled = settings.war;
+  };
+});
 $('quakeMid').onclick = () => { closePanels(); city.earthquake(6.3, world.controls.target.clone()); };
 $('quakeBig').onclick = () => { closePanels(); city.earthquake(7.2, { x: world.controls.target.x + 800, z: world.controls.target.z + 300 }); };
 $('stormTest').onclick = () => { closePanels(); city.spawnStorm('typhoon', 0.85); toast('強い台風が発生しました。上の警報を見て避難指示を判断してください'); };
@@ -360,7 +371,9 @@ function checkPolitics(): void {
   if (ev?.type === 'election') showElection(ev.result);
   if (ev?.type === 'quake') showQuake(ev.report);
   if (ev?.type === 'disaster') showDisaster(ev.report);
+  if (ev?.type === 'war') showWar(ev);
   updateAlert();
+  updateWarBar();
   const p = city.politics;
   if (p.pledgeChoiceOpen && !pledgeShown && $('modal').hidden) {
     pledgeShown = true;
@@ -406,6 +419,38 @@ $('btnEvac').onclick = () => {
   const r = city.evacuate(!st?.evacuated);
   if (r) toast(r);
 };
+
+// ---------- 紛争と合併 ----------
+function updateWarBar(): void {
+  const w = city.defense.war;
+  const el = $('warbar');
+  el.hidden = !w;
+  $('alert').style.top = w ? '176px' : '';
+  if (!w) return;
+  $('warTitle').textContent = `${w.name}と紛争中`;
+  const months = Math.floor((city.day - w.startDay) / 30);
+  $('warDetail').textContent = w.pendingVictory ? '勝ちました。防衛パネルで結末を選んでください' : `${months} か月目・${w.front >= 0 ? '優勢' : '劣勢'}（${Math.round(w.front)}）・失った部隊 ${w.ourLosses}・被害 ${w.damaged} 棟`;
+  const fr = $('warFront');
+  fr.style.width = `${Math.abs(w.front) / 2}%`;
+  fr.style.left = w.front >= 0 ? '50%' : `${50 - Math.abs(w.front) / 2}%`;
+  fr.style.background = w.front >= 0 ? '#3ea865' : '#d9573f';
+}
+$('btnWar').onclick = () => hall.toggle('defense', true);
+
+function showWar(ev: { kind: 'declared' | 'won' | 'lost' | 'peace' | 'merged' | 'refused'; name: string; text: string }): void {
+  const titles = { declared: `紛争：${ev.name}`, won: `${ev.name}との紛争に勝利`, lost: `${ev.name}との紛争に敗北`, peace: `${ev.name}と講和`, merged: `合併：${ev.name}`, refused: '合併案は否決されました' };
+  if (ev.kind === 'won' && city.defense.war?.pendingVictory) {
+    const n = city.neighbor(city.defense.war.edge)!;
+    const buttons = (Object.keys(VICTORY) as VictoryChoice[]).map((id) => ({ label: VICTORY[id].name, primary: id === 'reparations', onClick: () => { const r = city.settleVictory(id); if (r) toast(r); } }));
+    showModal(titles.won, [para(ev.text), ...(Object.keys(VICTORY) as VictoryChoice[]).map((id) => para(`${VICTORY[id].name}：${VICTORY[id].note(n)}`, 'note'))], buttons);
+    return;
+  }
+  if (ev.kind === 'won') { toast(ev.text); return; }
+  const extra = ev.kind === 'declared' ? [para('「防衛」パネルで部隊を増やし、戦況を見ながら講和を申し入れられます。画面上の帯に戦況が出ます。', 'note')] : [];
+  showModal(titles[ev.kind], [para(ev.text), ...extra], ev.kind === 'declared'
+    ? [{ label: '防衛パネルを開く', onClick: () => hall.toggle('defense', true) }, { label: '閉じる', primary: true }]
+    : [{ label: '閉じる', primary: true }]);
+}
 
 function showDisaster(r: DisasterReport): void {
   const t = document.createElement('table');
@@ -477,9 +522,31 @@ function updateLabels(): void {
     }
   }
   const w = canvas.clientWidth, h = canvas.clientHeight;
+  updateNeighborLabels(w, h);
   for (const [id, el] of labelEls) {
     const c = centroids.get(id)!;
     tmp.set(c.x, Math.max(0, heightAt(terrain, c.x, c.z)) + 25, c.z).project(world.camera);
+    const visible = tmp.z < 1 && Math.abs(tmp.x) < 1.1 && Math.abs(tmp.y) < 1.1;
+    el.hidden = !visible;
+    if (visible) el.style.transform = `translate(${((tmp.x + 1) / 2) * w}px, ${((1 - tmp.y) / 2) * h}px) translate(-50%, -50%)`;
+  }
+}
+
+// 隣町の名前（その町の土地の上に出す）
+const neighborEls = new Map<string, HTMLSpanElement>();
+function updateNeighborLabels(w: number, h: number): void {
+  for (const n of city.region.neighbors) {
+    let el = neighborEls.get(n.edge);
+    if (!el) { el = document.createElement('span'); el.className = 'neighbor-label'; labelsEl.append(el); neighborEls.set(n.edge, el); }
+    if (n.merged) { el.hidden = true; continue; }
+    const stage = stageOf(n.tension);
+    const war = city.defense.war?.edge === n.edge;
+    const text = `${n.name}${war ? '（紛争中）' : stage >= 1 ? `（${STAGE_NAMES[stage]}）` : ''}`;
+    if (el.textContent !== text) el.textContent = text;
+    el.dataset.stage = String(war ? 5 : stage);
+    el.title = `${EDGE_NAMES[n.edge]}の隣町`;
+    const p = n.edge === 'west' ? { x: -BORDER - 200, z: 0 } : n.edge === 'east' ? { x: BORDER + 200, z: 0 } : { x: 0, z: -BORDER - 200 };
+    tmp.set(p.x, Math.max(0, heightAt(terrain, p.x, p.z)) + 60, p.z).project(world.camera);
     const visible = tmp.z < 1 && Math.abs(tmp.x) < 1.1 && Math.abs(tmp.y) < 1.1;
     el.hidden = !visible;
     if (visible) el.style.transform = `translate(${((tmp.x + 1) / 2) * w}px, ${((1 - tmp.y) / 2) * h}px) translate(-50%, -50%)`;

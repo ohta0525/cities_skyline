@@ -5,7 +5,9 @@ import {
 } from '../city/economy';
 import { MILESTONES, RANKS, eraOf, yearOf } from '../city/eras';
 import { AI_MAYORS, FACTIONS, OPPOSITION_ACTIONS, PLEDGES, isElectionYear, type OppositionAction, type PledgeId } from '../city/politics';
-import { EDGE_NAMES, NEIGHBOR_KINDS } from '../city/region';
+import { EDGE_NAMES, NEIGHBOR_KINDS, STAGE_COLORS, STAGE_NAMES, stageOf, type Neighbor, type TreatyId } from '../city/region';
+import { DEMANDS, DIPLO_ACTIONS, FURUSATO_LIMIT, FURUSATO_RATES, TREATIES, mergeOdds, treatyBlock, type DiploActionId } from '../city/diplomacy';
+import { UNITS, UNITS_PER_GARRISON, VICTORY, peaceTerms, unitCount, upkeepOf, type UnitKind, type VictoryChoice } from '../city/defense';
 import { dateOf, formatDate } from '../sim/clock';
 
 import { DECREES, POLICIES, decreeActive, type DecreeId, type PolicyId } from '../city/policies';
@@ -19,9 +21,9 @@ import { ACTIONS, NPCS, REQUESTS, type ActionId, type NpcId } from '../city/conn
 import { ALERT_NAMES, alertLevel, SEAWALL_HEIGHTS } from '../city/water';
 import { FACILITIES } from '../city/facilities';
 
-export type PanelId = 'finance' | 'people' | 'politics' | 'region' | 'transport' | 'npc' | 'policy' | 'disaster' | 'info' | 'news';
+export type PanelId = 'finance' | 'people' | 'politics' | 'region' | 'defense' | 'transport' | 'npc' | 'policy' | 'disaster' | 'info' | 'news';
 
-const TITLES: Record<PanelId, string> = { finance: '財政', people: '住民', politics: '政治', region: '地域', transport: '交通と公共交通', npc: '関係者（コネ）', disaster: '防災と復興', policy: '政策と布告', info: '情報とハザードマップ', news: '新聞' };
+const TITLES: Record<PanelId, string> = { finance: '財政', people: '住民', politics: '政治', region: '地域と外交', defense: '防衛隊と紛争', transport: '交通と公共交通', npc: '関係者（コネ）', disaster: '防災と復興', policy: '政策と布告', info: '情報とハザードマップ', news: '新聞' };
 
 const INFO_VIEWS: { mode: InfoMode; label: string; group: string }[] = [
   { mode: 'none', label: 'ふつう', group: '表示' },
@@ -87,7 +89,7 @@ export class Panels {
   /** 毎フレーム呼ぶ。変化があったときだけ描き直す */
   update(): void {
     const c = this.getCity();
-    const v = c.versions.economy * 1000 + c.versions.news + c.versions.buildings * 7 + c.versions.services * 13 + c.versions.fires * 17 + c.versions.transit * 19 + c.versions.traffic * 23 + c.versions.water * 29;
+    const v = c.versions.economy * 1000 + c.versions.news + c.versions.buildings * 7 + c.versions.services * 13 + c.versions.fires * 17 + c.versions.transit * 19 + c.versions.traffic * 23 + c.versions.water * 29 + c.versions.war * 31;
     document.querySelectorAll<HTMLButtonElement>('.rail button[data-panel]').forEach((b) => {
       b.setAttribute('aria-pressed', String(b.dataset.panel === this.open));
     });
@@ -96,6 +98,8 @@ export class Panels {
     document.getElementById('politicsBadge')!.hidden = !c.politics.pledgeChoiceOpen;
     document.getElementById('npcBadge')!.hidden = !c.connections.requests.length;
     document.getElementById('disasterBadge')!.hidden = !c.activeStorm() && c.displaced < 50;
+    document.getElementById('regionBadge')!.hidden = !c.diplomacy.demands.length;
+    document.getElementById('defenseBadge')!.hidden = !c.defense.war;
     const last = c.news.at(-1);
     const ticker = document.getElementById('tickerText')!;
     const text = last ? `${formatDate(dateOf(last.day))}　${last.text}` : 'まだ記事はありません';
@@ -122,7 +126,7 @@ export class Panels {
     const head = h('div', { cls: 'phead' }, h('h2', {}, TITLES[this.open]), h('button', { cls: 'close', onclick: () => this.toggle(this.open!), title: '閉じる' }, '×'));
     ({
       finance: () => this.finance(c, body), people: () => this.people(c, body), politics: () => this.politics(c, body),
-      region: () => this.region(c, body), policy: () => this.policy(c, body),
+      region: () => this.region(c, body), defense: () => this.defensePanel(c, body), policy: () => this.policy(c, body),
       transport: () => this.transport(c, body), npc: () => this.npc(c, body), disaster: () => this.disaster(c, body), info: () => this.info(c, body), news: () => this.newsList(c, body),
     })[this.open]();
     const scroll = this.el.querySelector('.pbody')?.scrollTop ?? 0;
@@ -249,15 +253,143 @@ export class Panels {
 
   private region(c: City, el: HTMLElement): void {
     const last = c.econ.reports.at(-1);
+    const blocked = !!c.blockedReason();
+    const act = (r: string | null, ok?: string) => { if (r) this.ui.toast(r); else if (ok) this.ui.toast(ok); this.seen = -1; };
     el.append(row('交易の収入（先月）', last ? formatYen(last.income.trade) : '—'));
-    el.append(h('p', { cls: 'note' }, '地図の端まで道路を引くと、その方角の隣町とつながります。つながると通勤と交易が始まります。'));
-    for (const n of c.region.neighbors) {
-      el.append(h('div', { cls: 'neighbor' },
-        h('div', { cls: 'fhead' }, h('b', {}, n.name), h('span', { cls: 'note' }, `${EDGE_NAMES[n.edge]}・${NEIGHBOR_KINDS[n.kind].name}`)),
-        row('人口', `${n.population.toLocaleString()} 人`),
-        row('関係', h('span', { cls: 'v' }, bar(n.relation, 100, n.relation >= 0 ? '#3ea865' : '#d9573f', true), ` ${Math.round(n.relation)}`)),
-        row('道路', n.connected ? 'つながっている' : `未接続（地図の${EDGE_NAMES[n.edge].replace('（山側）', '')}端まで道路を引く）`, n.connected ? 'pos' : ''),
-        row('通勤', n.connected ? `行く ${n.outCommute.toLocaleString()} 人／来る ${n.inCommute.toLocaleString()} 人` : '—')));
+
+    // ふるさと納税
+    const f = c.diplomacy.furusato;
+    el.append(h('h3', {}, 'ふるさと納税'));
+    const i = FURUSATO_RATES.findIndex((r) => Math.abs(r - f.rate) < 1e-6);
+    el.append(h('div', { cls: 'row' }, h('span', { cls: 'stepper' }, '返礼品 ',
+      h('button', { onclick: () => c.setFurusatoRate(FURUSATO_RATES[Math.max(0, i - 1)]), disabled: blocked, title: '減らす' }, '−'),
+      h('b', { cls: f.rate > FURUSATO_LIMIT ? 'neg' : '' }, `寄付額の ${Math.round(f.rate * 100)}％`),
+      h('button', { onclick: () => c.setFurusatoRate(FURUSATO_RATES[Math.min(FURUSATO_RATES.length - 1, i + 1)]), disabled: blocked, title: '増やす' }, '+'))));
+    el.append(
+      row('寄付（先月）', formatYen(f.received)),
+      row('返礼品と事務の費用', formatYen(f.gifts)),
+      row('住民がほかの町に寄付して減った住民税', formatYen(f.lost), 'neg'),
+    );
+    if (c.day < f.excludedUntil) el.append(h('p', { cls: 'alert' }, `制度から外されています（あと ${Math.ceil((f.excludedUntil - c.day) / 30)} か月）。`));
+    else if (f.rate > FURUSATO_LIMIT) el.append(h('p', { cls: 'alert' }, `返礼品が 3 割を超えています。中央政府の是正に 6 か月応じないと、1 年間制度から外されます（${f.overMonths} か月目）。`));
+    el.append(h('p', { cls: 'note' }, '返礼品を増やすほど寄付が集まりますが、手元に残るお金は減ります。工業と商業が大きいほど特産品が増えます。'));
+
+    // 要求
+    if (c.diplomacy.demands.length) {
+      el.append(h('h3', {}, '隣町からの要求'));
+      for (const d of c.diplomacy.demands) {
+        el.append(h('div', { cls: 'request' }, d.text, h('br'), h('span', { cls: 'note' }, `期限まであと ${Math.max(0, Math.ceil((d.expires - c.day) / 30))} か月`),
+          h('div', { cls: 'row' },
+            h('button', { onclick: () => act(c.answerDemand(d.edge, true)), disabled: blocked, title: DEMANDS[d.kind].accept }, DEMANDS[d.kind].accept.replace(/（.*）/, '')),
+            h('button', { onclick: () => act(c.answerDemand(d.edge, false)), disabled: blocked, title: DEMANDS[d.kind].reject }, DEMANDS[d.kind].reject.replace(/（.*）/, ''))),
+          h('p', { cls: 'note' }, `受ける：${DEMANDS[d.kind].accept.match(/（(.*)）/)?.[1] ?? ''}／断る：${DEMANDS[d.kind].reject.match(/（(.*)）/)?.[1] ?? ''}`)));
+      }
+    }
+
+    el.append(h('h3', {}, '隣町'));
+    el.append(h('p', { cls: 'note' }, '市の境界（地図の白い点線）まで道路を引くと、その町とつながり、通勤と交易が始まります。関係が悪く緊張が高まると、抗議 → 経済制裁 → 境界の封鎖 → 小競り合い → 紛争 と進みます。'));
+    const power = c.militaryPower();
+    for (const n of c.region.neighbors) el.append(this.neighborCard(c, n, power, blocked, act));
+  }
+
+  private neighborCard(c: City, n: Neighbor, power: number, blocked: boolean, act: (r: string | null, ok?: string) => void): HTMLElement {
+    const head = h('div', { cls: 'fhead' }, h('b', {}, n.name), h('span', { cls: 'note' }, `${EDGE_NAMES[n.edge]}・${NEIGHBOR_KINDS[n.kind].name}${n.mayor ? `・${n.mayor} 市長` : ''}`));
+    if (n.merged) return h('div', { cls: 'neighbor merged' }, head, h('p', { cls: 'note' }, '合併して市の一部になりました。この方角の土地に道路を引いて街を広げられます。'));
+    const stage = stageOf(n.tension);
+    const war = c.defense.war?.edge === n.edge;
+    const card = h('div', { cls: `neighbor${stage >= 3 ? ' tense' : ''}` }, head,
+      row('人口', `${n.population.toLocaleString()} 人`),
+      row('関係', h('span', { cls: 'v' }, bar(n.relation, 100, n.relation >= 0 ? '#3ea865' : '#d9573f', true), ` ${Math.round(n.relation)}`)),
+      row('緊張', h('span', { cls: 'v' }, bar(n.tension, 100, STAGE_COLORS[stage]), ` ${Math.round(n.tension)}・${war ? '紛争中' : STAGE_NAMES[stage]}`), stage >= 2 ? 'neg' : ''),
+      row('軍備', `${Math.round(n.military)}（こちら ${Math.round(power)}）`, n.military > power * 1.5 ? 'neg' : ''),
+      row('道路', n.connected ? 'つながっている' : n.reach ? '封鎖されている' : `未接続（${EDGE_NAMES[n.edge].replace('（山側）', '')}の境界まで道路を引く）`, n.connected ? 'pos' : n.reach ? 'neg' : ''),
+      row('通勤', n.connected ? `行く ${n.outCommute.toLocaleString()} 人／来る ${n.inCommute.toLocaleString()} 人` : '—'),
+      row('ふるさと納税の返礼品', `${Math.round(n.furusatoRate * 100)}％`),
+    );
+    if (c.day < n.vassalUntil) card.append(h('p', { cls: 'perk on' }, `従属都市（あと ${Math.ceil((n.vassalUntil - c.day) / 360)} 年、上納金が入る）`));
+    if (c.day < n.truceUntil) card.append(h('p', { cls: 'note' }, `停戦の約束：あと ${Math.ceil((n.truceUntil - c.day) / 30)} か月は紛争になりません`));
+    // 協定
+    const chips = h('div', { cls: 'chips treaties' });
+    for (const id of Object.keys(TREATIES) as TreatyId[]) {
+      const on = n.treaties.includes(id);
+      const why = on ? null : treatyBlock(n, id);
+      chips.append(h('button', {
+        ariaPressed: String(on), disabled: blocked || war || (!on && !!why),
+        title: `${TREATIES[id].effect}${why ? `\n結べない理由：${why}` : on ? '\nもう一度押すと破棄（関係 −20、緊張 +10）' : ''}`,
+        onclick: () => act(c.toggleTreaty(n.edge, id)),
+      }, `${on ? '✓ ' : ''}${TREATIES[id].name}`));
+    }
+    card.append(h('p', { cls: 'note' }, '協定（ボタンに説明があります）'), chips);
+    // 手段
+    const acts = h('div', { cls: 'row wrap' });
+    for (const id of Object.keys(DIPLO_ACTIONS) as DiploActionId[]) {
+      const def = DIPLO_ACTIONS[id];
+      const cd = id === 'mediate' ? c.diplomacy.mediateDay : n.cooldowns[id] ?? 0;
+      const wait = cd > c.day ? `（${Math.ceil((cd - c.day) / 30)} か月後）` : '';
+      const low = def.minTension !== undefined && n.tension < def.minTension;
+      acts.append(h('button', { onclick: () => act(c.diplomacyAction(n.edge, id)), disabled: blocked || war || !!wait || low, title: def.note }, def.name + wait));
+    }
+    acts.append(h('button', { onclick: () => act(c.toggleSanction(n.edge)), disabled: blocked || war, ariaPressed: String(n.sanction), title: '交易を止めて相手の軍拡を抑える。関係 −15、緊張 +15' }, n.sanction ? '経済制裁を解除' : '経済制裁'));
+    const mo = mergeOdds(n, c.stats.population);
+    acts.append(h('button', {
+      onclick: () => act(c.proposeMerger(n.edge)), disabled: blocked || war || !!mo.reason || (n.cooldowns.merge ?? 0) > c.day,
+      title: mo.reason ? `合併できない理由：${mo.reason}` : `相手の議会が賛成する見込み：${Math.round(mo.odds * 100)}％。土地と住民、借金（${formatYen(n.population * 3)}）を引き継ぐ`,
+    }, '合併を申し入れる'));
+    const wb = c.warBlock(n.edge);
+    if (c.warEnabled) acts.append(h('button', { cls: 'danger', onclick: () => { if (confirm(`${n.name}に宣戦布告しますか？`)) act(c.declareWar(n.edge)); }, disabled: blocked || !!wb, title: wb ?? '紛争を始める' }, '宣戦布告'));
+    card.append(acts);
+    return card;
+  }
+
+  private defensePanel(c: City, el: HTMLElement): void {
+    const blocked = !!c.blockedReason();
+    const act = (r: string | null, ok?: string) => { if (r) this.ui.toast(r); else if (ok) this.ui.toast(ok); this.seen = -1; };
+    const w = c.defense.war;
+    if (w) {
+      const n = c.neighbor(w.edge)!;
+      const box = h('div', { cls: 'warbox' }, h('b', {}, `${w.name}との紛争`),
+        row('戦況', h('span', { cls: 'v' }, bar(w.front, 100, w.front >= 0 ? '#3ea865' : '#d9573f', true), ` ${w.front >= 0 ? '優勢' : '劣勢'} ${Math.round(w.front)}`)),
+        row('期間', `${Math.floor((c.day - w.startDay) / 30)} か月`),
+        row('失った部隊', `${w.ourLosses}`), row('相手の軍備', `${Math.round(n.military)}（こちら ${Math.round(c.militaryPower())}）`),
+        row('被害を受けた建物', `${w.damaged} 棟`, w.damaged ? 'neg' : ''));
+      if (w.pendingVictory) {
+        box.append(h('p', {}, '勝ちました。結末を選んでください。'));
+        for (const id of Object.keys(VICTORY) as VictoryChoice[]) {
+          box.append(h('div', { cls: 'policy-row' }, h('button', { onclick: () => act(c.settleVictory(id)) }, VICTORY[id].name), h('p', { cls: 'note' }, VICTORY[id].note(n))));
+        }
+      } else {
+        const t = peaceTerms(w, n);
+        const label = t.kind === 'theyPay' ? `講和する（賠償金 ${formatYen(t.amount)} を受け取る）` : t.kind === 'white' ? `講和を申し入れる（応じる見込み ${Math.round(t.chance * 100)}％）` : `講和する（賠償金 ${formatYen(t.amount)} を払う）`;
+        box.append(h('div', { cls: 'row' }, h('button', { onclick: () => act(c.proposePeace(), '講和が成立しました'), disabled: blocked || c.day < w.peaceTry }, label)));
+        box.append(h('p', { cls: 'note' }, '戦況は 5 日ごとに、部隊の力（訓練場で 1.25 倍）× 士気（支持率）× 補給（資金がマイナスだと下がる）と相手の軍備で決まります。長引くと厭戦気分で支持率が下がり、劣勢だと境界近くの街が被害を受けます。'));
+      }
+      el.append(box);
+    }
+    const d = c.defense;
+    el.append(h('h3', {}, '防衛隊'));
+    el.append(
+      row('軍事力', `${Math.round(c.militaryPower())}`),
+      row('部隊', `${d.units.length}／${d.units.length + Math.max(0, c.unitRoom())}（駐屯地 1 か所に ${UNITS_PER_GARRISON} 部隊）`),
+      row('維持費', `月 ${formatYen(upkeepOf(d))}`),
+      row('訓練場', c.hasFacility('training') ? 'あり（力 1.25 倍）' : 'なし'),
+    );
+    for (const k of Object.keys(UNITS) as UnitKind[]) {
+      const def = UNITS[k];
+      const why = c.unitBlock(k);
+      const n = unitCount(d, k);
+      el.append(h('div', { cls: 'policy-row' },
+        h('span', { cls: 'stepper' },
+          h('button', { onclick: () => act(c.disband(k)), disabled: blocked || !n, title: '解散する' }, '−'),
+          h('b', {}, `${n}`),
+          h('button', { onclick: () => act(c.recruit(k)), disabled: blocked || !!why, title: why ?? `編成する（${formatYen(c.unitCost(k))}）` }, '+')),
+        h('div', {}, h('b', {}, def.name), h('p', { cls: 'note' }, `${def.note}。力 ${def.power}・編成 ${formatYen(c.unitCost(k))}・月 ${formatYen(def.upkeep)}${why && !blocked ? `（${why}）` : ''}`))));
+    }
+    el.append(h('p', { cls: 'note' }, '「施設」の防衛から、駐屯地・訓練場・沿岸監視所・航空基地・兵器工場を建て、中央政府の基地を誘致できます。軍が強いと隣町への抑止になり防衛派が喜びますが、予算を食い、革新派と環境派は嫌います。'));
+    if (d.tribute && c.day < d.tribute.until) el.append(h('p', { cls: 'alert' }, `${d.tribute.name}に税収の ${Math.round(d.tribute.share * 100)}％を上納しています（あと ${Math.ceil((d.tribute.until - c.day) / 30)} か月）`));
+    if (!c.warEnabled) el.append(h('p', { cls: 'note' }, '平和モードです（設定で変えられます）。紛争は起きません。'));
+    if (d.records.length) {
+      el.append(h('h3', {}, '紛争の記録'));
+      for (const r of [...d.records].reverse().slice(0, 8)) el.append(row(formatDate(dateOf(r.endDay)), r.outcome, r.result === 'lost' ? 'neg' : ''));
     }
   }
 
@@ -448,9 +580,9 @@ export class Panels {
       row('防潮堤のある海岸', `${walls} 区間（最大 ${SEAWALL_HEIGHTS[Math.max(0, ...c.defenses.seawalls)]} m）`),
       row('避難所の受け入れ', `${c.shelterCapacity().toLocaleString()} 人（人口 ${c.stats.population.toLocaleString()} 人）`, c.shelterCapacity() < c.stats.population * 0.3 ? 'neg' : ''),
       row('津波避難タワー', `${towers} 基`),
-      row('防衛隊', c.hasFacility('garrison') ? '駐屯地あり（災害派遣を要請できる）' : 'なし'),
+      row('防衛隊', c.hasFacility('garrison') ? `駐屯地あり（災害派遣を要請できる。救助隊 ${unitCount(c.defense, 'rescue')}）` : 'なし'),
     );
-    el.append(h('p', { cls: 'note' }, '「防災」で堤防と防潮堤を高くし、「施設」の防災から遊水地・地下放水路・砂防ダム・避難タワー・防災公園・仮設住宅・防衛隊駐屯地を建てられます。ハザードマップは「情報」で見られます。'));
+    el.append(h('p', { cls: 'note' }, '「防災」で堤防と防潮堤を高くし、「施設」の防災から遊水地・地下放水路・砂防ダム・避難タワー・防災公園・仮設住宅を、防衛から防衛隊駐屯地を建てられます。ハザードマップは「情報」で見られます。'));
     el.append(h('h3', {}, '復興'));
     el.append(
       row('住まいを失った人', `${c.displaced.toLocaleString()} 人`, c.displaced > housing ? 'neg' : ''),

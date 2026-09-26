@@ -42,14 +42,14 @@ export const LOAN_RATE = 1.2;
 export const LOAN_MONTHS = 120;
 export const MAX_DEBT = 300_000;
 
-export type IncomeKey = 'res' | 'biz' | 'prop' | 'trade' | 'transit' | 'grant' | 'other';
-export type ExpenseKey = 'roads' | 'services' | 'transit' | 'imports' | 'policies' | 'loans' | 'construction' | 'defense' | 'other';
+export type IncomeKey = 'res' | 'biz' | 'prop' | 'trade' | 'transit' | 'grant' | 'furusato' | 'tribute' | 'other';
+export type ExpenseKey = 'roads' | 'services' | 'transit' | 'imports' | 'policies' | 'loans' | 'construction' | 'defense' | 'furusato' | 'tribute' | 'other';
 export const INCOME_NAMES: Record<IncomeKey, string> = {
-  res: '住民税', biz: '法人の税', prop: '固定資産税', trade: '交易', transit: '公共交通の運賃', grant: '国・県からの交付金', other: 'その他',
+  res: '住民税', biz: '法人の税', prop: '固定資産税', trade: '交易', transit: '公共交通の運賃', grant: '国・県からの交付金', furusato: 'ふるさと納税（返礼品を除く）', tribute: '上納金・賠償金', other: 'その他',
 };
 export const EXPENSE_NAMES: Record<ExpenseKey, string> = {
   roads: '道路の維持費', services: '施設の維持費', transit: '公共交通の運行費', imports: '電気・水などの購入', policies: '政策', loans: '市債の返済',
-  construction: '建設費', defense: '防衛費', other: '災害復旧など',
+  construction: '建設費', defense: '防衛費', furusato: 'ふるさと納税の流出（住民税）', tribute: '上納金', other: '災害復旧・外交など',
 };
 
 export interface MonthReport {
@@ -141,6 +141,14 @@ export interface MonthInputs {
   policies?: number;
   transitIncome?: number;
   transitCost?: number;
+  /** ふるさと納税の寄付から返礼品を除いた額 */
+  furusato?: number;
+  /** 住民がほかの町に寄付して減った住民税 */
+  furusatoOut?: number;
+  /** 従属都市からの上納金 */
+  tributeIn?: number;
+  /** 負けた相手に払う上納金 */
+  tributeOut?: number;
 }
 
 /** 月末の締め。収支を計算して資金に反映し、報告を返す */
@@ -153,6 +161,8 @@ export function closeMonth(e: EconomyState, m: MonthInputs): MonthReport {
     trade: m.trade,
     transit: m.transitIncome ?? 0,
     grant: m.grant,
+    furusato: m.furusato ?? 0,
+    tribute: m.tributeIn ?? 0,
     other: e.pending.refund,
   };
   let loanPay = 0;
@@ -167,11 +177,14 @@ export function closeMonth(e: EconomyState, m: MonthInputs): MonthReport {
   let roads = 0;
   for (const k of Object.keys(m.roadLength) as RoadType[]) roads += m.roadLength[k] * ROAD_UPKEEP[k];
   const services = m.services ?? 0, imports = m.imports ?? 0, policies = m.policies ?? 0, transit = m.transitCost ?? 0;
+  const furusatoOut = m.furusatoOut ?? 0, tributeOut = m.tributeOut ?? 0;
   const expense: Record<ExpenseKey, number> = {
-    roads, services, transit, imports, policies, loans: loanPay, construction: e.pending.construction, defense: m.defense, other: e.pending.other,
+    roads, services, transit, imports, policies, loans: loanPay, construction: e.pending.construction, defense: m.defense,
+    furusato: furusatoOut, tribute: tributeOut, other: e.pending.other,
   };
   // 建設費・払い戻しはその場で資金に反映済みなので、ここでは定常の収支だけ動かす
-  const recurring = income.res + income.biz + income.prop + income.trade + income.transit + income.grant - roads - services - transit - imports - policies - loanPay - m.defense;
+  const recurring = income.res + income.biz + income.prop + income.trade + income.transit + income.grant + income.furusato + income.tribute
+    - roads - services - transit - imports - policies - loanPay - m.defense - furusatoOut - tributeOut;
   e.money += recurring;
   const net = Object.values(income).reduce((a, b) => a + b, 0) - Object.values(expense).reduce((a, b) => a + b, 0);
   const report: MonthReport = { day: m.day, income, expense, net, money: e.money };

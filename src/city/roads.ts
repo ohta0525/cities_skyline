@@ -197,7 +197,8 @@ export class RoadNetwork {
 
     // 既存の道路と平行に重なっていないか
     for (const q of pts) {
-      if (stops.some((st) => dist2(st.p, q.p) < 14)) continue;
+      // つなぎ目のすぐそばは、つながる道路と重なって当然なので調べない（幅の広い道路ほど広く）
+      if (stops.some((st) => dist2(st.p, q.p) < Math.max(14, hw * 2 + 3))) continue;
       for (const s of this.segments.values()) {
         const cv = this.curveOf(s);
         const bb = bbox(cv, 30);

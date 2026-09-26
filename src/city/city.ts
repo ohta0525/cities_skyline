@@ -31,7 +31,20 @@ import {
   AI_MAYORS, OPPOSITION_ACTIONS, PLEDGES, addModifier, isElectionYear, newPolitics, pledgeKept, runElection, updateSupport,
   type AiMayorType, type ElectionResult, type OppositionAction, type PledgeId, type PoliticsState,
 } from './politics';
-import { commute, monthlyRegion, neighborJobs, neighborWorkers, newRegion, tradeIncome, updateConnections, type RegionState } from './region';
+import {
+  BORDER, STAGE_NAMES, active, canTrade, commute, monthlyRegion, neighborJobs, neighborWorkers, newRegion, normalizeRegion, ownerAt, stageOf, tradeIncome,
+  updateConnections, type Edge, type Neighbor, type RegionState, type TreatyId,
+} from './region';
+import {
+  DEMANDS, DIPLO_ACTIONS, TREATIES, clampTension, willAttack, demandText, furusatoMonth, furusatoRivals, mergeOdds, newDiplomacy, tensionMonth, treatyBlock,
+  type DemandKind, type DiploActionId, type DiplomacyState,
+} from './diplomacy';
+import {
+  UNITS, UNITS_PER_GARRISON, newDefense, ourPower, peaceTerms, unitCount, upkeepOf, warStep,
+  type DefenseState, type UnitKind, type VictoryChoice, type War, type WarResult,
+} from './defense';
+import { IMPORT } from './services';
+import { HALF } from '../world/terrain';
 import { RoadNetwork, halfWidth, type RoadPlan, type RoadType, type Snap, type RoadNode, type RoadSegment } from './roads';
 import { flattenRoad, type GridRange } from './terrainEdit';
 import { CELL_SIZE, ZONES, cellKey, generateCells, type Cell, type ZoneGroup, type ZoneId } from './zones';
@@ -104,6 +117,8 @@ export interface CityData {
   stormNo?: number;
   transit?: { stops: Stop[]; tracks: import('./transit').Track[]; lines: Line[]; nextId: number };
   connections?: ConnectionsState;
+  diplomacy?: DiplomacyState;
+  defense?: DefenseState;
 }
 
 export interface DisasterReport {
@@ -174,6 +189,12 @@ export class City {
   disasterReports: DisasterReport[] = [];
   displaced = 0;
   restricted: Restricted[] = [];
+  diplomacy: DiplomacyState = newDiplomacy();
+  defense: DefenseState = newDefense();
+  /** 設定で戦争をなくせる（平和モード） */
+  warEnabled = true;
+  /** 合併のときに建物を一気に建てる間は、電気や水道の不足で建ちにくくならない */
+  private seeding = false;
   flood: FloodView | null = null;
   private stormNo = 0;
   private dispatchUntil = 0;
@@ -183,11 +204,16 @@ export class City {
   day = 0;
   stats: CityStats = { ...EMPTY_STATS };
   /** 変更のたびに増える番号。描画側はこれを見て作り直す */
-  versions = { roads: 0, cells: 0, buildings: 0, districts: 0, economy: 0, news: 0, facilities: 0, fires: 0, services: 0, transit: 0, traffic: 0, water: 0 };
+  versions = { roads: 0, cells: 0, buildings: 0, districts: 0, economy: 0, news: 0, facilities: 0, fires: 0, services: 0, transit: 0, traffic: 0, water: 0, territory: 0, war: 0 };
   /** 地形を変えた範囲（描画側が取り出して反映する） */
   terrainChanges: GridRange[] = [];
   /** 画面に知らせたい出来事（選挙結果など）。描画側が取り出す */
-  events: ({ type: 'election'; result: ElectionResult } | { type: 'quake'; report: QuakeReport } | { type: 'disaster'; report: DisasterReport })[] = [];
+  events: (
+    | { type: 'election'; result: ElectionResult }
+    | { type: 'quake'; report: QuakeReport }
+    | { type: 'disaster'; report: DisasterReport }
+    | { type: 'war'; kind: 'declared' | 'won' | 'lost' | 'peace' | 'merged' | 'refused'; name: string; text: string }
+  )[] = [];
   private nextBuildingId = 1;
   private rand: () => number;
   private lastJobs = 0;
@@ -219,7 +245,23 @@ export class City {
   }
 
   planRoad(start: Snap, end: Snap, control: P2 | null, type: RoadType): RoadPlan {
-    return this.net.plan(start, end, control, type);
+    const plan = this.net.plan(start, end, control, type);
+    if (!plan.ok) return plan;
+    // 隣町の土地には道路を引けない（境界までは引ける）
+    const c = plan.curve;
+    for (let k = 0; k <= 16; k++) {
+      const t = k / 16, u = 1 - t;
+      const x = u * u * c.p0.x + 2 * u * t * c.c.x + t * t * c.p2.x;
+      const z = u * u * c.p0.z + 2 * u * t * c.c.z + t * t * c.p2.z;
+      const n = ownerAt(this.region, x, z);
+      if (n) return { ...plan, ok: false, reason: `ここから先は${n.name}の土地です（合併すると使えます）` };
+    }
+    return plan;
+  }
+
+  /** 市の土地か（隣町の土地でない） */
+  ownsLand(p: P2): boolean {
+    return !ownerAt(this.region, p.x, p.z);
   }
 
   roadCost(plan: RoadPlan): number {
@@ -367,6 +409,7 @@ export class City {
       if (Math.abs(c.x - center.x) > radius || Math.abs(c.z - center.z) > radius) continue;
       if (Math.hypot(c.x - center.x, c.z - center.z) > radius) continue;
       if (c.zone === zone || (onlyEmpty && c.zone) || c.facility || (zone && this.isRestricted(c))) continue;
+      if (zone && !this.ownsLand(c)) continue;
       if (c.building > 0) this.removeBuilding(c.building);
       c.zone = zone;
       changed++;
@@ -400,6 +443,7 @@ export class City {
       this.growDay(d);
       this.disasterDay(d);
       this.stormDay(d);
+      this.warDay(d);
       if (this.trafficDirty && d % 3 === 0) this.refreshTraffic();
       if (d % 30 === 0) this.monthly(d);
       if (d % 360 === 0) this.yearly(d);
@@ -433,7 +477,7 @@ export class City {
   private tryBuild(front: Cell, day: number): boolean {
     // 電気や水道が足りないと建ちにくい
     const u = this.services?.util;
-    if (u && (u.power.served < 0.6 || u.water.served < 0.6) && this.rand() < 0.7) return false;
+    if (!this.seeding && u && (u.power.served < 0.6 || u.water.served < 0.6) && this.rand() < 0.7) return false;
     const district = this.districts.at(front)?.id ?? 0;
     if (hasPolicy(this.policies, district, 'fireproof') && this.rand() < 0.2) return false;
     const era = eraOf(yearOf(day));
@@ -587,17 +631,22 @@ export class City {
     const mayor = this.politics.mayor;
     const aiActive = mayor !== 'player' && day > this.politics.blockAiUntil;
     const wasBankrupt = this.econ.bankrupt;
+    const dm = this.diplomacyMoney(day);
     closeMonth(this.econ, {
       day,
       residents: s.population,
       jobs: s.comJobs + s.indJobs - s.shortage,
       buildingValue: buildingValueSum,
       roadLength,
-      trade: tradeIncome(this.region, s.indJobs, s.comJobs),
-      grant: 300 + s.population * 0.05 + (this.connections.rel.governor >= 50 ? 300 : 0),
-      defense: aiActive && mayor === 'hawk' ? 800 : 0,
+      trade: tradeIncome(this.region, s.indJobs, s.comJobs) + dm.arms,
+      grant: 300 + s.population * 0.05 + (this.connections.rel.governor >= 50 ? 300 : 0) + dm.grant,
+      defense: upkeepOf(this.defense),
       services: [...this.facilities.values()].reduce((a, f) => a + FACILITIES[f.kind].upkeep, 0),
-      imports: this.services?.importCost ?? 0,
+      imports: Math.max(0, (this.services?.importCost ?? 0) - dm.importDiscount),
+      furusato: dm.furusato,
+      furusatoOut: dm.furusatoOut,
+      tributeIn: dm.tributeIn,
+      tributeOut: dm.tributeOut,
       policies: this.policyCost(),
       transitIncome: transitMoney.income,
       transitCost: transitMoney.cost,
@@ -609,6 +658,7 @@ export class City {
 
     // 隣町
     monthlyRegion(this.region, this.rand);
+    this.diplomacyMonth(day);
 
     // 政治
     const jobs = s.comJobs + s.indJobs;
@@ -655,6 +705,11 @@ export class City {
         this.say('市長選挙まであと 3 か月。返り咲きを目指して公約を掲げましょう', 'politics');
       }
       p.pledgeChoiceOpen = true;
+      for (const n of active(this.region)) {
+        if (n.relation >= -30) continue;
+        addModifier(p, 'all', -4, day + 100, `${n.name}の選挙介入`);
+        this.say(`仲の悪い${n.name}が対立候補を支援しているとの報道。市長選に影を落とす`, 'politics');
+      }
     }
 
     // 人口の節目と市の格
@@ -744,6 +799,26 @@ export class City {
       }
     } else if (type === 'hawk') {
       if (day % 180 === 0) this.say('市長が防衛費の増額を表明', 'politics');
+      const kind: UnitKind = this.rand() < 0.5 ? 'mobile' : 'infantry';
+      if (this.econ.money > 30_000 && this.unitRoom() > 0 && this.rand() < 0.4) {
+        this.addUnit(kind);
+        this.say(`市長が${UNITS[kind].name}を新たに編成`, 'politics');
+      }
+      const rivals = active(this.region);
+      if (rivals.length && this.rand() < 0.25) {
+        const n = rivals[Math.floor(this.rand() * rivals.length)];
+        n.tension = Math.min(100, n.tension + 8);
+        n.relation = Math.max(-100, n.relation - 6);
+        this.say(`市長が${n.name}を名指しで批判。「なめられてはいけない」`, 'politics');
+      }
+      const w = this.defense.war;
+      if (w && !w.pendingVictory && w.front < -30 && day >= w.peaceTry) this.proposePeace(true);
+      if (w?.pendingVictory) this.settleVictory('annex');
+    }
+    if (type !== 'hawk') {
+      const w = this.defense.war;
+      if (w && !w.pendingVictory && w.front < 0 && day >= w.peaceTry) this.proposePeace(true);
+      if (w?.pendingVictory) this.settleVictory('reparations');
     }
   }
 
@@ -770,6 +845,8 @@ export class City {
       }
     }
     if (def.unlockYear && this.year < def.unlockYear) return fail(`${def.unlockYear} 年目から建てられます`, cells);
+    if (cells.some((c) => !this.ownsLand(c))) return fail('隣町の土地には建てられません', cells);
+    if (def.unique && this.hasFacility(kind)) return fail(`${def.name}は市に 1 つだけです`, cells);
     if (def.needsWater && !this.nearWater(cells)) return fail('川か海の近く（80 m 以内）に建ててください', cells);
     const blocked = this.blockedReason();
     if (blocked) return fail(blocked, cells);
@@ -1135,6 +1212,7 @@ export class City {
     }
     const blocked = this.blockedReason();
     if (blocked) return { ok: false, reason: blocked, cost: 0, p };
+    if (!this.ownsLand(p)) return { ok: false, reason: '隣町の土地には置けません', cost: 0, p };
     let cost = Math.round(def.stopCost * (privately ? 0.3 : 1));
     if (mode === 'bus' || mode === 'tram') {
       const snap = snapStopToRoad(this.net, p, mode === 'tram');
@@ -1495,6 +1573,7 @@ export class City {
     const level = this.defenses.levees[sec] ?? 0;
     const cost = Math.round(LEVEE_COST * this.buildDiscount());
     if (Math.hypot(rp.x - p.x, rp.z - p.z) > rp.width / 2 + 90 || rp.level <= 0.01) return { ok: false, reason: '川岸の近く（海より上流）をクリックしてください', sec, cost, level };
+    if (!this.ownsLand(p)) return { ok: false, reason: '隣町の土地です', sec, cost, level };
     if (level >= LEVEE_MAX) return { ok: false, reason: 'この区間の堤防はこれ以上高くできません', sec, cost, level };
     const blocked = this.blockedReason();
     if (blocked) return { ok: false, reason: blocked, sec, cost, level };
@@ -1516,6 +1595,7 @@ export class City {
     const level = this.defenses.seawalls[sec] ?? 0;
     const cost = Math.round((SEAWALL_COST[level + 1] ?? 0) * this.buildDiscount());
     if (Math.abs(coastDistance(this.terrain, p.x, p.z)) > 140) return { ok: false, reason: '海岸線の近くをクリックしてください', sec, cost, level };
+    if (!this.ownsLand(p)) return { ok: false, reason: '隣町の土地です', sec, cost, level };
     if (level >= SEAWALL_HEIGHTS.length - 1) return { ok: false, reason: 'この区間の防潮堤はこれ以上高くできません', sec, cost, level };
     const blocked = this.blockedReason();
     if (blocked) return { ok: false, reason: blocked, sec, cost, level };
@@ -1632,7 +1712,7 @@ export class City {
     }
     // 避難指示が出ていれば逃げ遅れはいない。遅すぎた（当日）ときは一部
     const lateness = !st.evacuated ? 1 : st.evacDay >= st.hit ? 0.4 : 0;
-    const rescue = this.hasFacility('garrison') || day < this.dispatchUntil ? 0.5 : 1;
+    const rescue = (this.hasFacility('garrison') || day < this.dispatchUntil ? 0.5 : 1) * this.rescueFactor();
     r.stranded = Math.round(exposed * 0.12 * lateness * rescue);
     this.finishDisaster(r, st.evacuated && r.above + r.collapsed + r.landslides === 0);
     // 浸水の範囲を表示する
@@ -1664,7 +1744,7 @@ export class City {
       if (dmg === 'below') r.below++;
       else { r.above++; b.damagedUntil = day + 150; r.displaced += Math.round(b.residents * 0.7); }
     }
-    const rescue = this.hasFacility('garrison') ? 0.5 : 1;
+    const rescue = (this.hasFacility('garrison') ? 0.5 : 1) * this.rescueFactor() * (this.hasFacility('coastwatch') ? 0.8 : 1);
     r.stranded = Math.round(unsafe * 0.25 * rescue);
     r.note = exposed ? `浸水した地域の ${Math.round((1 - unsafe / exposed) * 100)}％ の人は、避難タワーや高台に逃げられました` : '';
     this.nuclearCheck(0, null, height);
@@ -1689,9 +1769,9 @@ export class City {
     if (damage >= 20) {
       r.aid = Math.round(r.collapsed * 300 + r.above * 80 + r.landslides * 300 + r.damaged * 40);
       refund(this.econ, r.aid);
-      const friends = this.region.neighbors.filter((n) => n.connected && n.relation > 30);
+      const friends = active(this.region).filter((n) => n.treaties.includes('aid') || (n.connected && n.relation > 30));
       if (friends.length) {
-        const help = friends.length * 3_000;
+        const help = friends.reduce((a, n) => a + (n.treaties.includes('aid') ? 6_000 : 3_000), 0);
         refund(this.econ, help);
         r.aid += help;
         this.say(`${friends.map((n) => n.name).join('・')}から応援の職員と義援金 ${formatYen(help)} が届きました`, 'good');
@@ -1764,7 +1844,7 @@ export class City {
     this.dispatchUntil = this.day + 45;
     for (const r of [...this.rubble]) r.clearDay = Math.min(r.clearDay, this.day + 10);
     for (const b of this.buildings.values()) if (b.damagedUntil && b.damagedUntil > this.day) b.damagedUntil -= 30;
-    this.displaced = Math.round(this.displaced * 0.85);
+    this.displaced = Math.round(this.displaced * Math.max(0.55, 0.85 - unitCount(this.defense, 'rescue') * 0.05));
     addModifier(this.politics, 'defense', 6, this.day + 360, '災害派遣');
     this.say('防衛隊が災害派遣。救助とがれきの撤去、給水・入浴支援が始まりました', 'good');
     this.versions.economy++;
@@ -1931,7 +2011,681 @@ export class City {
     if (decreeActive(this.policies, 'staggered', day)) add('business', -3);
     add('business', -this.traffic.congestion * 12 + Math.max(0, this.connections.rel.chamber - 30) / 8);
     if (decreeActive(this.policies, 'curfew', day)) add('progress', -15);
+    this.defenseExtra(day, add);
     return extra;
+  }
+
+  // ---------- 外交 ----------
+  neighbor(edge: Edge): Neighbor | undefined {
+    return this.region.neighbors.find((n) => n.edge === edge);
+  }
+
+  /** 月末の収支に入る外交・防衛のお金 */
+  private diplomacyMoney(day: number): { furusato: number; furusatoOut: number; tributeIn: number; tributeOut: number; arms: number; grant: number; importDiscount: number } {
+    const s = this.stats;
+    const resTax = s.population * 0.35 * (this.econ.taxes.res / 10);
+    const goods = Math.min(0.7, (s.indJobs + s.comJobs * 0.5) / 5000);
+    const f = furusatoMonth(this.diplomacy.furusato, this.region, { day, population: s.population, goods, resTax });
+    const fs = this.diplomacy.furusato;
+    if (fs.overMonths === 1) this.say(`中央政府が「返礼品は寄付額の 3 割以下に」と是正を求めています（今は ${Math.round(fs.rate * 100)}％）`, 'politics');
+    if (fs.overMonths >= 6 && day >= fs.excludedUntil) {
+      fs.excludedUntil = day + 360;
+      fs.overMonths = 0;
+      this.say('返礼品の是正に応じなかったため、ふるさと納税の制度から 1 年間外されました', 'bad');
+    }
+    let tributeIn = 0;
+    for (const n of this.region.neighbors) if (day < n.vassalUntil) tributeIn += n.population * 0.05;
+    let tributeOut = 0;
+    const tr = this.defense.tribute;
+    if (tr && day < tr.until) {
+      const last = this.econ.reports.at(-1);
+      const taxes = last ? last.income.res + last.income.biz + last.income.prop : resTax;
+      tributeOut = taxes * tr.share;
+    } else if (tr) {
+      this.defense.tribute = null;
+      this.say(`${tr.name}への上納金の支払いが終わりました`, 'good');
+    }
+    const linked = this.region.neighbors.some((n) => canTrade(n));
+    let arms = 0, grant = 0;
+    for (const fac of this.facilities.values()) {
+      const def = FACILITIES[fac.kind];
+      if (def.income && linked) arms += def.income;
+      grant += def.grant ?? 0;
+    }
+    // 広域連携：ゴミと下水の購入費が半分
+    let importDiscount = 0;
+    const u = this.services?.util;
+    if (u && this.region.neighbors.some((n) => n.connected && n.treaties.includes('wide'))) {
+      importDiscount = (u.garbage.imported * IMPORT.garbage.price + u.sewage.imported * IMPORT.sewage.price) * 0.5;
+    }
+    return { furusato: f.net, furusatoOut: f.lost, tributeIn, tributeOut, arms, grant, importDiscount };
+  }
+
+  /** 月ごとの外交：緊張、事件、小競り合い、宣戦布告 */
+  private diplomacyMonth(day: number): void {
+    const power = this.militaryPower();
+    const hawk = this.politics.mayor === 'hawk' && day > this.politics.blockAiUntil;
+    for (const n of active(this.region)) {
+      if (this.defense.war?.edge === n.edge) continue;
+      const before = stageOf(n.tension);
+      tensionMonth(n, { ourPower: power, hawkMayor: hawk, warEnabled: this.warEnabled, day }, this.rand);
+      const after = stageOf(n.tension);
+      if (after > before) {
+        const text = [
+          '', `${n.name}が市に抗議声明。両市の関係が冷え込んでいます`, `${n.name}が経済制裁を発動。交易が止まりました`,
+          `${n.name}が境界を封鎖。通勤と物流が止まりました`, `境界付近で${n.name}の部隊と小競り合い。緊張が最高潮に`, '',
+        ][after];
+        if (text) this.say(`【外交】${text}`, 'bad');
+        if (after >= 3) this.trafficDirty = true;
+      } else if (after < before) {
+        this.say(`【外交】${n.name}との緊張が和らぎ、「${STAGE_NAMES[after]}」に戻りました`, 'good');
+        if (before >= 3) this.trafficDirty = true;
+      }
+      if (after === 4 && this.rand() < 0.5) {
+        const hit = this.damageBorder(n.edge, 1 + Math.floor(this.rand() * 3), 220);
+        if (hit) this.say(`境界付近で${n.name}側から砲撃。建物 ${hit} 棟に被害`, 'bad');
+      }
+      if (n.tension >= 100 && this.warEnabled && !this.defense.war) {
+        if (willAttack(n, power)) this.startWar(n, 'them');
+        else n.tension = 95;
+      }
+      // 事件（要求）
+      if (!this.diplomacy.demands.some((d) => d.edge === n.edge) && this.rand() < 0.035) {
+        const kinds: DemandKind[] = ['border', 'dump'];
+        if (n.edge === 'north') kinds.push('water');
+        if (n.treaties.includes('aid') || this.rand() < 0.3) kinds.push('evacuees');
+        const kind = kinds[Math.floor(this.rand() * kinds.length)];
+        this.diplomacy.demands.push({ edge: n.edge, kind, text: demandText(n, kind), expires: day + 60 });
+        this.say(`【外交】${demandText(n, kind)}（「地域」パネルで対応を決めてください）`, 'politics');
+      }
+    }
+    for (const d of [...this.diplomacy.demands]) {
+      if (d.expires > day) continue;
+      // 答えないまま期限が過ぎると、相手は少し気を悪くする
+      this.diplomacy.demands.splice(this.diplomacy.demands.indexOf(d), 1);
+      const n = this.neighbor(d.edge);
+      if (!n || n.merged) continue;
+      n.relation = Math.max(-100, n.relation - 5);
+      n.tension = Math.min(tensionCapOf(n, this), n.tension + 4);
+      this.say(`${n.name}の要求に答えないまま期限が過ぎ、相手は「無視された」と不満を漏らしています`, 'politics');
+    }
+    for (const t of furusatoRivals(this.diplomacy.furusato, this.region, this.rand)) this.say(t, 'politics');
+    // 戦争の月ごとの報道と厭戦気分
+    const w = this.defense.war;
+    if (w && !w.pendingVictory) {
+      const months = Math.floor((day - w.startDay) / 30);
+      this.say(`【紛争】${w.name}との紛争 ${months} か月目。戦況 ${w.front >= 0 ? '優勢' : '劣勢'}（${Math.round(w.front)}）、失った部隊 ${w.ourLosses}`, w.front >= 0 ? 'politics' : 'bad');
+    }
+    updateConnections(this.region, this.net);
+    this.versions.economy++;
+  }
+
+  /** 軍事力（部隊の力の合計に、訓練・士気・補給をかけたもの） */
+  militaryPower(): number {
+    return ourPower(this.defense, { training: this.hasFacility('training'), approval: this.politics.approval, money: this.econ.money });
+  }
+
+  /** 外交の手段を使う。できなければ理由 */
+  diplomacyAction(edge: Edge, id: DiploActionId): string | null {
+    const n = this.neighbor(edge);
+    const def = DIPLO_ACTIONS[id];
+    if (!n || n.merged) return 'その町はもうありません';
+    const blocked = this.blockedReason();
+    if (blocked) return blocked;
+    if (this.defense.war?.edge === edge) return '紛争中です。「防衛」パネルから講和を申し入れてください';
+    const cd = id === 'mediate' ? this.diplomacy.mediateDay : n.cooldowns[id] ?? 0;
+    if (cd > this.day) return `あと ${Math.ceil((cd - this.day) / 30)} か月は使えません`;
+    if (def.minTension && n.tension < def.minTension) return `緊張が ${def.minTension} 以上のときに使えます`;
+    if (def.cost > this.econ.money) return `資金が足りません（必要 ${formatYen(def.cost)}）`;
+    if (id === 'mediate' && this.connections.rel.governor < 40) return '県知事との関係が 40 以上必要です';
+    let msg = '';
+    switch (id) {
+      case 'goodwill': n.relation += 6; n.tension -= 3; msg = `${n.name}を親善訪問。${n.mayor}市長と会談しました`; break;
+      case 'aid': n.relation += 15; n.tension -= 8; msg = `${n.name}に経済支援。${n.mayor}市長が感謝を表明`; break;
+      case 'protest':
+        n.relation -= 10; n.tension += 8;
+        addModifier(this.politics, 'defense', 2, this.day + 180, '隣町への抗議');
+        msg = `${n.name}に抗議しました`; break;
+      case 'negotiate': {
+        const ratio = this.militaryPower() / Math.max(1, n.military);
+        const chance = 0.35 + n.relation / 200 + Math.min(0.25, (ratio - 1) * 0.15);
+        if (this.rand() < chance) { n.tension -= 20; msg = `${n.name}との交渉がまとまり、緊張が和らぎました`; }
+        else { n.tension += 3; msg = `${n.name}との交渉は物別れに終わりました`; }
+        break;
+      }
+      case 'concede':
+        n.tension -= 30; n.relation += 5;
+        addModifier(this.politics, 'defense', -6, this.day + 360, '隣町への譲歩');
+        addModifier(this.politics, 'tradition', -3, this.day + 360, '隣町への譲歩');
+        msg = `${n.name}の言い分を飲んで譲歩しました。「弱腰だ」との批判も`; break;
+      case 'mediate':
+        n.tension -= 35;
+        this.connections.rel.governor -= 10;
+        this.diplomacy.mediateDay = this.day + def.cooldown;
+        msg = `県知事が${n.name}との間に入り、話し合いの場が設けられました`; break;
+    }
+    if (def.cost) spend(this.econ, def.cost, 'other');
+    if (id !== 'mediate') n.cooldowns[id] = this.day + def.cooldown;
+    n.relation = Math.max(-100, Math.min(100, n.relation));
+    n.tension = Math.max(0, Math.min(100, n.tension));
+    clampTension(n, this.warEnabled, this.day);
+    updateConnections(this.region, this.net);
+    this.say(msg, 'politics');
+    this.versions.economy++;
+    return null;
+  }
+
+  /** 経済制裁をかける・やめる */
+  toggleSanction(edge: Edge): string | null {
+    const n = this.neighbor(edge);
+    if (!n || n.merged) return 'その町はもうありません';
+    const blocked = this.blockedReason();
+    if (blocked) return blocked;
+    n.sanction = !n.sanction;
+    if (n.sanction) {
+      n.relation = Math.max(-100, n.relation - 15);
+      n.tension = Math.min(100, n.tension + 15);
+      clampTension(n, this.warEnabled, this.day);
+      n.treaties = n.treaties.filter((t) => t === 'nonaggression');
+      this.say(`${n.name}に経済制裁。交易を止めました`, 'politics');
+    } else {
+      n.tension = Math.max(0, n.tension - 5);
+      this.say(`${n.name}への経済制裁を解除しました`, 'politics');
+    }
+    updateConnections(this.region, this.net);
+    this.versions.economy++;
+    return null;
+  }
+
+  /** 協定を結ぶ・やめる */
+  toggleTreaty(edge: Edge, id: TreatyId): string | null {
+    const n = this.neighbor(edge);
+    if (!n || n.merged) return 'その町はもうありません';
+    const blocked = this.blockedReason();
+    if (blocked) return blocked;
+    if (n.treaties.includes(id)) {
+      n.treaties = n.treaties.filter((t) => t !== id);
+      n.relation = Math.max(-100, n.relation - 20);
+      n.tension = Math.min(100, n.tension + 10);
+      clampTension(n, this.warEnabled, this.day);
+      this.say(`${n.name}との${TREATIES[id].name}を破棄しました。相手は強く反発しています`, 'politics');
+    } else {
+      const why = treatyBlock(n, id);
+      if (why) return why;
+      n.treaties.push(id);
+      n.relation = Math.min(100, n.relation + 3);
+      clampTension(n, this.warEnabled, this.day);
+      this.say(`${n.name}と${TREATIES[id].name}を結びました`, 'good');
+      if (id === 'alliance') for (const o of active(this.region)) if (o !== n && o.relation < 0) o.tension = Math.min(tensionCapOf(o, this), o.tension + 6);
+    }
+    updateConnections(this.region, this.net);
+    this.versions.economy++;
+    return null;
+  }
+
+  /** 隣町の要求に答える */
+  answerDemand(edge: Edge, accept: boolean): string | null {
+    const i = this.diplomacy.demands.findIndex((d) => d.edge === edge);
+    if (i < 0) return null;
+    const d = this.diplomacy.demands[i];
+    const n = this.neighbor(edge);
+    this.diplomacy.demands.splice(i, 1);
+    if (!n || n.merged) return null;
+    const until = this.day + 360;
+    const k = d.kind;
+    if (accept) {
+      if (k === 'water') { if (this.econ.money < 2_000) return '資金が足りません（必要 2,000万円）'; spend(this.econ, 2_000, 'other'); n.relation += 8; n.tension -= 5; }
+      if (k === 'border') { n.relation += 6; n.tension -= 8; addModifier(this.politics, 'defense', -4, until, '境界線での譲歩'); addModifier(this.politics, 'tradition', -4, until, '境界線での譲歩'); }
+      if (k === 'dump') { n.relation += 8; addModifier(this.politics, 'green', -5, until, '隣町のゴミ処分場'); }
+      if (k === 'evacuees') { if (this.econ.money < 1_500) return '資金が足りません（必要 1,500万円）'; spend(this.econ, 1_500, 'other'); n.relation += 15; n.tension -= 6; addModifier(this.politics, 'progress', 3, until, '被災者の受け入れ'); }
+      this.say(`${n.name}の要求を受け入れました：${DEMANDS[k].accept.replace(/（.*）/, '')}`, 'politics');
+    } else {
+      if (k === 'water') { n.relation -= 8; n.tension += 12; }
+      if (k === 'border') { n.relation -= 6; n.tension += 10; addModifier(this.politics, 'defense', 2, until, '境界線で譲らない'); }
+      if (k === 'dump') { n.relation -= 6; n.tension += 8; addModifier(this.politics, 'green', 3, until, 'ゴミ処分場に抗議'); }
+      if (k === 'evacuees') n.relation -= 12;
+      this.say(`${n.name}の要求を断りました`, 'politics');
+    }
+    n.relation = Math.max(-100, Math.min(100, n.relation));
+    n.tension = Math.max(0, Math.min(100, n.tension));
+    clampTension(n, this.warEnabled, this.day);
+    updateConnections(this.region, this.net);
+    this.versions.economy++;
+    return null;
+  }
+
+  /** ふるさと納税の返礼品の割合を変える */
+  setFurusatoRate(rate: number): void {
+    this.diplomacy.furusato.rate = Math.round(Math.max(0.1, Math.min(0.5, rate)) * 100) / 100;
+    this.versions.economy++;
+  }
+
+  /** 合併を申し入れる */
+  proposeMerger(edge: Edge): string | null {
+    const n = this.neighbor(edge);
+    if (!n || n.merged) return 'その町はもうありません';
+    const blocked = this.blockedReason();
+    if (blocked) return blocked;
+    if ((n.cooldowns.merge ?? 0) > this.day) return `断られたばかりです（あと ${Math.ceil((n.cooldowns.merge - this.day) / 30)} か月）`;
+    const { odds, reason } = mergeOdds(n, this.stats.population);
+    if (reason) return reason;
+    if (this.rand() >= odds) {
+      n.cooldowns.merge = this.day + 360;
+      n.relation = Math.max(-100, n.relation - 5);
+      this.say(`${n.name}の議会が合併案を否決しました。「町の名前と役場を残したい」`, 'politics');
+      this.events.push({ type: 'war', kind: 'refused', name: n.name, text: `${n.name}の議会が合併案を否決しました。1 年たったら、もう一度申し入れられます。` });
+      this.versions.economy++;
+      return null;
+    }
+    this.mergeNeighbor(n, false);
+    return null;
+  }
+
+  /** 隣町の土地と人を市に組み込む。forced は戦争での併合 */
+  mergeNeighbor(n: Neighbor, forced: boolean): void {
+    const pop = n.population;
+    n.merged = true;
+    n.connected = false;
+    n.reach = false;
+    n.treaties = [];
+    n.sanction = false;
+    n.tension = 0;
+    this.diplomacy.demands = this.diplomacy.demands.filter((d) => d.edge !== n.edge);
+    const residents = this.seedSettlement(n, forced);
+    const until = this.day + 360 * 3;
+    let text: string;
+    if (forced) {
+      addModifier(this.politics, 'all', -6, until, '強制的な併合');
+      addModifier(this.politics, 'progress', -8, until, '強制的な併合');
+      for (const o of active(this.region)) { o.relation = Math.max(-100, o.relation - 15); o.tension = Math.min(tensionCapOf(o, this), o.tension + 10); }
+      text = `${n.name}を併合しました。住民 ${residents.toLocaleString()} 人が市民になりましたが、反発も根強く残っています。ほかの隣町は警戒を強めています。`;
+    } else {
+      const debt = Math.round(pop * 3);
+      this.inheritDebt(debt);
+      const bonus = Math.round(pop * 2);
+      refund(this.econ, bonus);
+      addModifier(this.politics, 'tradition', 4, until, '合併');
+      text = `${n.name}との合併が住民投票で決まりました。住民 ${residents.toLocaleString()} 人が市民になり、${EDGE_LABEL[n.edge]}の土地が使えるようになります。借金 ${formatYen(debt)} を引き継ぎ、国から合併の支援 ${formatYen(bonus)} が入りました。`;
+    }
+    this.say(`【合併】${text}`, forced ? 'politics' : 'good');
+    this.events.push({ type: 'war', kind: 'merged', name: n.name, text });
+    updateConnections(this.region, this.net);
+    this.versions.territory++;
+    this.versions.economy++;
+    this.refreshServices();
+    this.recount();
+  }
+
+  private inheritDebt(amount: number): void {
+    if (amount <= 0) return;
+    const e = this.econ;
+    const months = 120, rate = 1.2, r = rate / 100 / 12;
+    e.loans.push({ id: e.nextLoanId++, principal: amount, remaining: amount, monthly: (amount * r) / (1 - Math.pow(1 + r, -months)), monthsLeft: months, rate });
+  }
+
+  /** 合併した土地に、もとの町の道路と家並みをつくる。市民になった人数を返す */
+  private seedSettlement(n: Neighbor, forced: boolean): number {
+    const inStrip = (p: P2) => Math.abs(p.x) < HALF - 50 && Math.abs(p.z) < HALF - 50 &&
+      (n.edge === 'west' ? p.x < -BORDER + 10 : n.edge === 'east' ? p.x > BORDER - 10 : p.z < -BORDER + 10 && Math.abs(p.x) < BORDER);
+    const dry = (p: P2) => heightAt(this.terrain, p.x, p.z) > 1.5 && waterLevelAt(this.terrain, p.x, p.z) === null;
+    // いちばん平らで乾いた場所（山あいなら谷底）を探す
+    let seed: P2 | null = null, bestScore = Infinity;
+    for (let a = -HALF + 60; a <= HALF - 60; a += 24) {
+      for (let b = -HALF + 60; b <= HALF - 60; b += 24) {
+        const p = { x: a, z: b };
+        if (!inStrip(p) || !dry(p)) continue;
+        const h = heightAt(this.terrain, a, b);
+        let rough = 0;
+        for (const [dx, dz] of [[30, 0], [-30, 0], [0, 30], [0, -30], [21, 21], [-21, -21]]) {
+          const q = { x: a + dx, z: b + dz };
+          rough += Math.abs(heightAt(this.terrain, q.x, q.z) - h) + (dry(q) ? 0 : 20);
+        }
+        const score = rough + h * 0.01;
+        if (score < bestScore) { bestScore = score; seed = p; }
+      }
+    }
+    if (!seed) return 0;
+    const before = new Set(this.net.segments.keys());
+    // 道を少しずつ伸ばす（勾配が急な方向はあきらめる）
+    const heads: { p: P2; dir: number }[] = [{ p: seed, dir: 0 }, { p: seed, dir: Math.PI }];
+    const placed: P2[] = [seed];
+    let built = 0;
+    for (let guard = 0; guard < 120 && built < 18 && heads.length; guard++) {
+      const h = heads.shift()!;
+      const tries: [number, number][] = [];
+      for (const len of [56 + Math.floor(this.rand() * 3) * 8, 40, 32]) {
+        for (const turn of [0, 0.35, -0.35, 0.7, -0.7, 1.05, -1.05, Math.PI / 2, -Math.PI / 2, 2.2, -2.2]) tries.push([turn, len]);
+      }
+      for (const [turn, len] of tries) {
+        const dir = h.dir + turn;
+        const end = { x: h.p.x + Math.cos(dir) * len, z: h.p.z + Math.sin(dir) * len };
+        if (!inStrip(end) || !dry(end)) continue;
+        if (placed.some((q) => Math.hypot(q.x - end.x, q.z - end.z) < 28)) continue;
+        const plan = this.net.plan(this.net.snap(h.p), this.net.snap(end), null, 'local');
+        if (!plan.ok) continue;
+        for (const id of this.net.build(plan)) this.flatten(id);
+        placed.push(end);
+        built++;
+        heads.push({ p: end, dir });
+        // ときどき横道を出す
+        if (this.rand() < 0.45) heads.push({ p: end, dir: dir + (this.rand() < 0.5 ? 1 : -1) * Math.PI / 2 });
+        break;
+      }
+    }
+    if (!built) return 0;
+    this.afterRoadChange();
+    const fresh = [...this.net.segments.keys()].filter((id) => !before.has(id));
+    if (!fresh.length) return 0;
+    const mix: Record<Neighbor['kind'], [ZoneId, number][]> = {
+      village: [[1, 0.7], [3, 0.2], [5, 0.1]],
+      industrial: [[6, 0.35], [5, 0.2], [1, 0.3], [2, 0.15]],
+      tourism: [[4, 0.3], [3, 0.2], [1, 0.5]],
+      bedtown: [[1, 0.6], [2, 0.3], [3, 0.1]],
+      military: [[1, 0.5], [2, 0.2], [5, 0.3]],
+    };
+    const pickZone = (): ZoneId => {
+      let r = this.rand();
+      for (const [z, w] of mix[n.kind]) { if ((r -= w) <= 0) return z; }
+      return 1;
+    };
+    const freshSet = new Set(fresh);
+    const blockZone = new Map<string, ZoneId>();
+    const cells = [...this.cells.values()].filter((cl) => freshSet.has(cl.seg) && !cl.facility && this.ownsLand(cl));
+    for (const cl of cells) {
+      const key = `${cl.seg}:${cl.side}:${Math.floor(cl.i / 4)}`;
+      if (!blockZone.has(key)) blockZone.set(key, pickZone());
+      cl.zone = blockZone.get(key)!;
+    }
+    // 家並みを一気に建てる（古い町なので建築年は昔）
+    const target = Math.min(1_800, Math.round(n.population * (forced ? 0.5 : 1)));
+    const year = yearOf(this.day);
+    let residents = 0, guard = 0;
+    const known = new Set(this.buildings.keys());
+    this.seeding = true;
+    const fronts = cells.filter((cl) => cl.depth === 0);
+    while (residents < target && guard++ < 1_500 && fronts.length) {
+      const f = fronts[Math.floor(this.rand() * fronts.length)];
+      if (f.building || f.zone === 0) continue;
+      if (this.tryBuild(f, this.day)) {
+        const b = this.buildings.get(f.building)!;
+        if (!b || known.has(b.id)) continue;
+        known.add(b.id);
+        b.built = Math.max(1, year - Math.floor(this.rand() * (n.kind === 'village' ? 45 : 30)));
+        b.seismic = b.built >= SEISMIC_LAW_YEAR ? 'new' : 'old';
+        b.day = this.day - 10;
+        residents += b.residents;
+      }
+    }
+    this.seeding = false;
+    this.versions.cells++;
+    this.versions.buildings++;
+    return residents;
+  }
+
+  // ---------- 防衛隊 ----------
+  /** 救助隊が多いほど逃げ遅れが減る */
+  private rescueFactor(): number {
+    return Math.max(0.4, 1 - unitCount(this.defense, 'rescue') * 0.1);
+  }
+
+  /** あといくつ部隊を置けるか */
+  unitRoom(): number {
+    let garrisons = 0;
+    for (const f of this.facilities.values()) if (f.kind === 'garrison') garrisons++;
+    return garrisons * UNITS_PER_GARRISON - this.defense.units.length;
+  }
+
+  unitCost(kind: UnitKind): number {
+    return Math.round(UNITS[kind].cost * (this.hasFacility('armsFactory') ? 0.8 : 1));
+  }
+
+  /** 部隊を編成できない理由 */
+  unitBlock(kind: UnitKind): string | null {
+    const def = UNITS[kind];
+    if (this.unitRoom() <= 0) return this.hasFacility('garrison') ? `駐屯地が満員です（1 か所に ${UNITS_PER_GARRISON} 部隊まで）` : '防衛隊駐屯地がありません（「施設」の防衛から建てられます）';
+    if (def.unlockYear && this.year < def.unlockYear) return `${def.unlockYear} 年目から編成できます`;
+    if (def.needs && !this.hasFacility(def.needs)) return `${FACILITIES[def.needs].name}が必要です`;
+    const cost = this.unitCost(kind);
+    if (cost > this.econ.money) return `資金が足りません（必要 ${formatYen(cost)}）`;
+    return null;
+  }
+
+  recruit(kind: UnitKind): string | null {
+    const blocked = this.blockedReason();
+    if (blocked) return blocked;
+    const why = this.unitBlock(kind);
+    if (why) return why;
+    spend(this.econ, this.unitCost(kind));
+    this.addUnit(kind);
+    this.say(`防衛隊に${UNITS[kind].name}を編成しました`, 'politics');
+    this.versions.economy++;
+    return null;
+  }
+
+  private addUnit(kind: UnitKind): void {
+    if (this.unitRoom() <= 0) return;
+    this.defense.units.push({ id: this.defense.nextUnitId++, kind, since: this.day });
+    this.versions.war++;
+  }
+
+  disband(kind: UnitKind): string | null {
+    const blocked = this.blockedReason();
+    if (blocked) return blocked;
+    const i = this.defense.units.findIndex((u) => u.kind === kind);
+    if (i < 0) return 'その部隊はありません';
+    this.defense.units.splice(i, 1);
+    this.say(`${UNITS[kind].name}を解散しました`, 'politics');
+    this.versions.war++;
+    this.versions.economy++;
+    return null;
+  }
+
+  // ---------- 紛争 ----------
+  /** 宣戦布告できない理由 */
+  warBlock(edge: Edge): string | null {
+    const n = this.neighbor(edge);
+    if (!n || n.merged) return 'その町はもうありません';
+    if (!this.warEnabled) return '平和モードです（設定で変えられます）';
+    if (this.defense.war) return 'すでに紛争中です';
+    if (this.day < n.truceUntil) return '停戦の約束の期間中です';
+    if (this.day < n.vassalUntil) return '従属都市です';
+    if (n.treaties.includes('nonaggression')) return '不可侵条約を結んでいます';
+    if (n.tension < 60) return '緊張が「境界の封鎖」（60）以上のときだけ宣戦布告できます';
+    if (!this.defense.units.length) return '部隊がありません';
+    return null;
+  }
+
+  declareWar(edge: Edge): string | null {
+    const blocked = this.blockedReason();
+    if (blocked) return blocked;
+    const why = this.warBlock(edge);
+    if (why) return why;
+    this.startWar(this.neighbor(edge)!, 'us');
+    return null;
+  }
+
+  private startWar(n: Neighbor, aggressor: 'us' | 'them'): void {
+    const w: War = {
+      edge: n.edge, name: n.name, startDay: this.day, front: 0, aggressor, ourLosses: 0, theirLosses: 0, damaged: 0,
+      pendingVictory: false, peaceTry: this.day + 20,
+    };
+    this.defense.war = w;
+    n.tension = 100;
+    n.treaties = [];
+    n.relation = Math.min(n.relation, -50);
+    this.diplomacy.demands = this.diplomacy.demands.filter((d) => d.edge !== n.edge);
+    const until = this.day + 180;
+    let text: string;
+    if (aggressor === 'them') {
+      addModifier(this.politics, 'all', 6, until, '国難に団結');
+      text = `${n.name}が市に宣戦を布告しました。境界で部隊が衝突しています。部隊の数と訓練、支持率（士気）、資金（補給）で戦況が決まります。`;
+    } else {
+      addModifier(this.politics, 'defense', 8, until, '開戦');
+      addModifier(this.politics, 'tradition', 4, until, '開戦');
+      addModifier(this.politics, 'progress', -10, this.day + 720, '開戦');
+      addModifier(this.politics, 'green', -5, this.day + 720, '開戦');
+      for (const o of active(this.region)) if (o !== n) { o.relation = Math.max(-100, o.relation - 10); o.tension = Math.min(tensionCapOf(o, this), o.tension + 5); }
+      text = `${n.name}に宣戦を布告しました。境界で部隊が衝突しています。ほかの隣町は警戒を強めています。`;
+    }
+    this.say(`【紛争】${text}`, 'bad');
+    this.events.push({ type: 'war', kind: 'declared', name: n.name, text });
+    updateConnections(this.region, this.net);
+    this.trafficDirty = true;
+    this.versions.war++;
+    this.versions.economy++;
+  }
+
+  private warDay(day: number): void {
+    const w = this.defense.war;
+    if (!w || w.pendingVictory || day % 5 !== 0) return;
+    const n = this.neighbor(w.edge);
+    if (!n || n.merged) { this.defense.war = null; return; }
+    let allies = 0;
+    for (const o of active(this.region)) if (o !== n && o.treaties.includes('alliance')) allies += o.military * 0.5;
+    const step = warStep(w, n, { ours: this.militaryPower(), allies, base: this.hasFacility('nationalBase') ? 150 : 0, rand: this.rand });
+    if (step.lostUnit && this.defense.units.length) {
+      const order: UnitKind[] = ['infantry', 'mobile', 'naval', 'air', 'rescue'];
+      const kind = order.find((k) => unitCount(this.defense, k) > 0)!;
+      this.defense.units.splice(this.defense.units.findIndex((u) => u.kind === kind), 1);
+      w.ourLosses++;
+      this.say(`【紛争】${UNITS[kind].name}が大きな損害を受け、戦えなくなりました`, 'bad');
+    }
+    if (step.hits) {
+      const hits = Math.max(1, Math.round(step.hits * (this.hasFacility('airbase') ? 0.5 : 1)));
+      w.damaged += this.damageBorder(w.edge, hits, 200 + Math.max(0, -w.front) * 4);
+    }
+    this.versions.war++;
+    if (w.front >= 100 || n.military < 3) {
+      w.front = 100;
+      w.pendingVictory = true;
+      const text = `${n.name}の部隊が撤退し、紛争に勝ちました。結末を選んでください。`;
+      this.say(`【紛争】${text}`, 'good');
+      this.events.push({ type: 'war', kind: 'won', name: n.name, text });
+    } else if (w.front <= -100) {
+      this.defeat(n);
+    }
+  }
+
+  /** 境界近くの建物に被害を与える。被害を受けた棟数を返す */
+  private damageBorder(edge: Edge, count: number, band: number): number {
+    const dist = (x: number, z: number) => (edge === 'west' ? x + BORDER : edge === 'east' ? BORDER - x : z + BORDER);
+    const list = [...this.buildings.values()].filter((b) => { const d = dist(b.x, b.z); return d > 0 && d < band; });
+    let hit = 0;
+    for (let k = 0; k < count && list.length; k++) {
+      const b = list.splice(Math.floor(this.rand() * list.length), 1)[0];
+      if (this.rand() < 0.4) { this.displaced += b.residents; this.destroyBuilding(b, this.day); }
+      else { b.damagedUntil = this.day + 90; this.displaced += Math.round(b.residents * 0.3); }
+      hit++;
+    }
+    for (const f of this.facilities.values()) {
+      const d = dist(f.x, f.z);
+      if (d > 0 && d < band * 0.6 && this.rand() < 0.05 * count) f.downUntil = Math.max(f.downUntil, this.day + 60);
+    }
+    if (hit) { this.versions.buildings++; this.recount(); }
+    return hit;
+  }
+
+  /** 講和を申し入れる。auto は AI 市長が申し入れるとき */
+  proposePeace(auto = false): string | null {
+    const w = this.defense.war;
+    if (!w) return '紛争中ではありません';
+    if (w.pendingVictory) return '勝った紛争の結末を選んでください';
+    if (!auto) { const blocked = this.blockedReason(); if (blocked) return blocked; }
+    if (this.day < w.peaceTry) return `相手はまだ話し合いに応じません（あと ${w.peaceTry - this.day} 日）`;
+    const n = this.neighbor(w.edge)!;
+    const t = peaceTerms(w, n);
+    if (t.kind === 'theyPay') {
+      refund(this.econ, t.amount);
+      this.endWar('peace', `${n.name}から賠償金 ${formatYen(t.amount)} を受け取り、講和しました`);
+    } else if (t.kind === 'white') {
+      if (this.rand() >= t.chance) {
+        w.peaceTry = this.day + 30;
+        this.say(`${n.name}は講和の申し入れを拒みました`, 'politics');
+        this.versions.economy++;
+        return `${n.name}は講和を拒みました（30 日後にもう一度申し入れられます）`;
+      }
+      this.endWar('peace', `${n.name}と講和しました（どちらも賠償なし）`);
+    } else {
+      spend(this.econ, t.amount, 'other');
+      addModifier(this.politics, 'defense', -8, this.day + 720, '屈辱的な講和');
+      this.endWar('peace', `${n.name}に賠償金 ${formatYen(t.amount)} を払って講和しました`);
+    }
+    return null;
+  }
+
+  /** 勝ったときの結末を選ぶ */
+  settleVictory(choice: VictoryChoice): string | null {
+    const w = this.defense.war;
+    if (!w?.pendingVictory) return '選べる結末はありません';
+    const n = this.neighbor(w.edge)!;
+    let text = '';
+    if (choice === 'annex') {
+      this.endWar('won', `${n.name}に勝ち、併合しました`);
+      this.mergeNeighbor(n, true);
+      return null;
+    }
+    if (choice === 'reparations') {
+      const amount = Math.round(n.population * 1.5 / 10) * 10;
+      refund(this.econ, amount);
+      text = `${n.name}に勝ち、賠償金 ${formatYen(amount)} を受け取りました`;
+    } else {
+      n.vassalUntil = this.day + 3600;
+      text = `${n.name}に勝ち、従属都市にしました。10 年間、上納金が入ります`;
+    }
+    this.endWar('won', text);
+    return null;
+  }
+
+  private defeat(n: Neighbor): void {
+    const amount = Math.round(20_000 + n.population);
+    spend(this.econ, amount, 'other');
+    this.defense.tribute = { edge: n.edge, name: n.name, until: this.day + 1800, share: 0.08 };
+    addModifier(this.politics, 'all', -12, this.day + 720, '紛争での敗北');
+    this.endWar('lost', `${n.name}との紛争に敗れました。賠償金 ${formatYen(amount)} を払い、5 年間は税収の 8％を上納します`);
+  }
+
+  private endWar(result: WarResult, text: string): void {
+    const w = this.defense.war;
+    if (!w) return;
+    const n = this.neighbor(w.edge);
+    if (n) {
+      n.tension = result === 'won' ? 20 : 35;
+      n.truceUntil = this.day + 720;
+      n.relation = Math.min(n.relation, result === 'peace' ? -20 : -40);
+      n.military = Math.max(n.military, 5);
+    }
+    this.defense.records.push({ name: w.name, startDay: w.startDay, endDay: this.day, result, outcome: text });
+    this.defense.war = null;
+    if (result === 'won') addModifier(this.politics, 'all', 6, this.day + 360, '紛争の勝利');
+    this.say(`【紛争】${text}`, result === 'lost' ? 'bad' : 'politics');
+    this.events.push({ type: 'war', kind: result === 'lost' ? 'lost' : result === 'won' ? 'won' : 'peace', name: w.name, text });
+    updateConnections(this.region, this.net);
+    this.trafficDirty = true;
+    this.versions.war++;
+    this.versions.economy++;
+  }
+
+  /** 防衛と外交による派閥の支持の上乗せ */
+  private defenseExtra(day: number, add: (id: FactionId, v: number) => void): void {
+    const power = this.militaryPower();
+    add('defense', Math.min(12, power / 25));
+    const threat = active(this.region).some((n) => stageOf(n.tension) >= 2);
+    if (threat && !this.defense.units.length) add('defense', -6);
+    add('progress', -Math.min(8, power / 60));
+    add('green', -Math.min(5, power / 100));
+    if (this.hasFacility('nationalBase')) { add('defense', 6); add('green', -3); }
+    let arms = 0;
+    for (const f of this.facilities.values()) if (f.kind === 'armsFactory') arms++;
+    add('progress', -Math.min(6, arms * 3));
+    const w = this.defense.war;
+    if (w && !w.pendingVictory) {
+      const months = (day - w.startDay) / 30;
+      const rally = w.aggressor === 'them' ? Math.max(0, 8 - months * 2) : Math.max(0, 3 - months);
+      const weariness = Math.min(30, months * 2 + w.ourLosses * 1.5 + w.damaged * 0.2);
+      for (const id of ['business', 'labor', 'tradition', 'progress', 'green', 'defense'] as FactionId[]) add(id, rally - weariness);
+      add('defense', 8);
+    }
+    if (this.defense.tribute && day < this.defense.tribute.until) for (const id of ['business', 'labor', 'tradition', 'defense'] as FactionId[]) add(id, -4);
   }
 
   // ---------- 集計 ----------
@@ -2044,6 +2798,8 @@ export class City {
       displaced: this.displaced,
       restricted: this.restricted.slice(),
       stormNo: this.stormNo,
+      diplomacy: structuredClone(this.diplomacy),
+      defense: structuredClone(this.defense),
     };
   }
 
@@ -2091,7 +2847,10 @@ export class City {
     this.districts.decode(data.districts.grid);
     if (data.economy) this.econ = structuredClone(data.economy);
     if (data.politics) this.politics = structuredClone(data.politics);
-    if (data.region) this.region = structuredClone(data.region);
+    if (data.region) this.region = normalizeRegion(structuredClone(data.region));
+    if (data.diplomacy) this.diplomacy = { ...newDiplomacy(), ...structuredClone(data.diplomacy) };
+    if (data.defense) this.defense = { ...newDefense(), ...structuredClone(data.defense) };
+    this.versions.territory++;
     if (data.news) this.news = data.news.slice();
     if (data.meta) this.meta = { ...data.meta };
     this.day = Math.floor(day);
@@ -2103,6 +2862,12 @@ export class City {
     this.recount();
     this.lastJobs = this.stats.comJobs + this.stats.indJobs;
   }
+}
+
+const EDGE_LABEL: Record<Edge, string> = { west: '西', east: '東', north: '北の山側' };
+
+function tensionCapOf(n: Neighbor, c: City): number {
+  return n.treaties.includes('nonaggression') || c.day < n.truceUntil ? 59 : c.warEnabled ? 100 : 79;
 }
 
 function insideMapSafe(p: P2): boolean {

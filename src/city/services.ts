@@ -204,6 +204,7 @@ export function computeServices(inp: Input): ServiceReport {
     return Math.min(1, s);
   };
 
+  const noisy = facs.filter((f) => FACILITIES[f.kind].noise);
   const per = new Map<number, BuildingService>();
   let resTotal = 0, hapSum = 0, polSum = 0;
   const cov = { fire: 0, police: 0, health: 0, education: 0 };
@@ -228,7 +229,14 @@ export function computeServices(inp: Input): ServiceReport {
       fire: cover('fire', cx, cz), police: cover('police', cx, cz), health: cover('health', cx, cz), education: cover('education', cx, cz),
       leisure: Math.min(12, leisure), pollution: b.residents ? pollutionAt(cx, cz) : 0, happiness: 0,
     };
-    let hap = 60 + (s.power ? 0 : -8) + (s.water ? 0 : -7) + (s.sewage ? 0 : -3) + (s.garbage ? 0 : -3)
+    let noise = 0;
+    for (const f of noisy) {
+      const [amount, radius] = FACILITIES[f.kind].noise!;
+      const c = center(f);
+      const d = Math.hypot(c.x - cx, c.z - cz);
+      if (d < radius) noise += amount * (1 - d / radius);
+    }
+    let hap = 60 - Math.min(12, noise) + (s.power ? 0 : -8) + (s.water ? 0 : -7) + (s.sewage ? 0 : -3) + (s.garbage ? 0 : -3)
       + (s.fire > 0 ? 3 : -2) + (s.police > 0 ? 4 : inp.curfew ? -1 : -3) + (s.health > 0 ? 4 : -3)
       + (b.residents ? (s.education > 0 ? 5 : -2) : 0) + s.leisure - s.pollution * 25;
     if (b.damagedUntil && b.damagedUntil > inp.day) hap -= 10;
