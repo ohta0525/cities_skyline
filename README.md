@@ -5,6 +5,18 @@
 Cities: Skylines 2 を目標にした、ブラウザで遊べる 3D の街づくりゲームです。
 企画とロードマップは [docs/DESIGN.md](docs/DESIGN.md) にまとめています。
 
+## パソコンで遊ぶ（ダウンロード）
+
+インストールは要りません。HTML ファイル 1 つで動きます。
+
+1. [download/mizuho-city.html](download/mizuho-city.html) を開き、右上の「Download raw file」（下向き矢印のボタン）を押して保存します
+2. 保存した `mizuho-city.html` をダブルクリックすると、ブラウザ（Chrome／Edge／Firefox）で始まります
+
+- ファイルは好きな場所に置けますが、置き場所を変えないほうが安全です（セーブデータはブラウザの中に、開いた場所ごとに保存されるため）
+- 大事な街は、セーブデータの画面の「書き出す」でファイルにしておくと、別のパソコンやブラウザでも「設定 → ファイルから読み込む」で続きを遊べます
+- インターネットにつながっていなくても遊べます（文字の書体だけ、パソコンにあるものに変わります）
+- 新しい版にするときは、同じ手順でファイルを取り直して上書きしてください
+
 ## 遊ぶ
 
 - **公開版**：https://ohta0525.github.io/cities_skyline/
@@ -232,7 +244,10 @@ npm run dev        # 開発サーバー（http://localhost:5173）
 npm test           # テスト
 npm run typecheck  # 型チェック
 npm run build      # 本番ビルド（dist/）
+npm run build:single  # 1 つの HTML にまとめる（download/mizuho-city.html）
 ```
+
+改造したい場合は、[Node.js](https://nodejs.org/)（LTS 版）を入れてから、このリポジトリを「Code → Download ZIP」か `git clone` で取り込み、上のコマンドを実行します。
 
 ### 構成
 

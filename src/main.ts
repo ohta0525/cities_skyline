@@ -1,4 +1,6 @@
 import './style.css';
+import SimWorker from './sim/worker.ts?worker&inline';
+import { SimEngine } from './sim/engine';
 import { randomSeed } from './core/rng';
 import { loadSettings, saveSettings, type Quality, type Settings } from './core/settings';
 import { World3D } from './render/world3d';
@@ -48,12 +50,41 @@ let terrain: Terrain;
 let city: City;
 
 // ---------- シミュレーション（別スレッド） ----------
-const worker = new Worker(new URL('./sim/worker.ts', import.meta.url), { type: 'module' });
-const send = (m: ToWorker) => worker.postMessage(m);
+// ワーカーは本体に埋め込む（1 つの HTML ファイルでも動くように）。
+// ワーカーが動かないブラウザ（ファイルを直接開いたときなど）では、画面側で暦を進める
+let worker: Worker | null = null;
+let local: SimEngine | null = null;
+let lastInit: ToWorker | null = null;
+let gotTick = false;
+try {
+  worker = new SimWorker();
+  worker.onmessage = (e: MessageEvent<FromWorker>) => { gotTick = true; onSim(e.data); };
+  worker.onerror = () => useLocalClock();
+} catch {
+  worker = null;
+}
+function useLocalClock(): void {
+  if (local) return;
+  worker?.terminate();
+  worker = null;
+  local = new SimEngine(onSim);
+  if (lastInit) local.handle(lastInit);
+}
+const send = (m: ToWorker) => {
+  // 切り替えたときに同じ状態から始められるよう、最新の設定を覚えておく
+  if (m.type === 'init') {
+    lastInit = m;
+    if (worker && !gotTick) setTimeout(() => { if (!gotTick) useLocalClock(); }, 1500);
+  } else if (lastInit?.type === 'init' && m.type === 'speed') lastInit = { ...lastInit, speed: m.speed };
+  else if (lastInit?.type === 'init' && m.type === 'yearMinutes') lastInit = { ...lastInit, yearMinutes: m.yearMinutes };
+  if (worker) { worker.postMessage(m); return; }
+  if (!local) useLocalClock();
+  local!.handle(m);
+};
 let lastMonth = -1;
-worker.onmessage = (e: MessageEvent<FromWorker>) => {
-  if (e.data.type !== 'tick') return;
-  sim = e.data.state;
+function onSim(m: FromWorker): void {
+  if (m.type !== 'tick') return;
+  sim = m.state;
   city?.advanceTo(sim.day);
   updateClock();
   updateStats();
@@ -61,7 +92,7 @@ worker.onmessage = (e: MessageEvent<FromWorker>) => {
   const month = Math.floor(sim.day / MONTH_DAYS);
   if (lastMonth >= 0 && month !== lastMonth && !demoCity && city.ending?.kind !== 'coup') autoSave();
   lastMonth = month;
-};
+}
 
 // ---------- 3D ----------
 const canvas = $<HTMLCanvasElement>('view');

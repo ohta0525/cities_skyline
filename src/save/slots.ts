@@ -29,15 +29,18 @@ function db(): Promise<IDBDatabase | null> {
   dbp = new Promise((resolve) => {
     try {
       if (typeof indexedDB === 'undefined') { resolve(null); return; }
+      // ファイルを直接開いたときなど、ブラウザによっては応答がないまま止まるので、待ちすぎない
+      const timer = setTimeout(() => resolve(null), 1500);
+      const done = (v: IDBDatabase | null) => { clearTimeout(timer); resolve(v); };
       const req = indexedDB.open(DB, 1);
       req.onupgradeneeded = () => {
         const d = req.result;
         if (!d.objectStoreNames.contains(META)) d.createObjectStore(META, { keyPath: 'id' });
         if (!d.objectStoreNames.contains(DATA)) d.createObjectStore(DATA);
       };
-      req.onsuccess = () => resolve(req.result);
-      req.onerror = () => resolve(null);
-      req.onblocked = () => resolve(null);
+      req.onsuccess = () => done(req.result);
+      req.onerror = () => done(null);
+      req.onblocked = () => done(null);
     } catch {
       resolve(null);
     }
