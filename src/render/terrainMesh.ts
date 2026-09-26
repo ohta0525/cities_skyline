@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { ENV, ENV_DECL } from './env';
 import { smoothstep } from '../core/noise';
 import { CELL, GRID, HALF, type Terrain } from '../world/terrain';
 
@@ -68,13 +69,23 @@ export function buildTerrainMesh(t: Terrain): THREE.Mesh {
   // 隣町の土地は少しくすませ、市の境界に白い点線を描く
   const territory = { uBorder: { value: BORDER_M }, uOther: { value: new THREE.Vector3(1, 1, 1) } };
   mat.onBeforeCompile = (sh) => {
-    Object.assign(sh.uniforms, territory);
+    Object.assign(sh.uniforms, territory, ENV);
     sh.vertexShader = sh.vertexShader
-      .replace('#include <common>', '#include <common>\nvarying vec3 vTerrWorld;')
-      .replace('#include <worldpos_vertex>', '#include <worldpos_vertex>\nvTerrWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;');
+      .replace('#include <common>', '#include <common>\nvarying vec3 vTerrWorld;\nvarying float vTerrUp;')
+      .replace('#include <worldpos_vertex>', '#include <worldpos_vertex>\nvTerrWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;\nvTerrUp = normal.y;');
     sh.fragmentShader = sh.fragmentShader
-      .replace('#include <common>', '#include <common>\nvarying vec3 vTerrWorld;\nuniform float uBorder;\nuniform vec3 uOther;')
+      .replace('#include <common>', `#include <common>\nvarying vec3 vTerrWorld;\nvarying float vTerrUp;\nuniform float uBorder;\nuniform vec3 uOther;\n${ENV_DECL}`)
       .replace('#include <color_fragment>', `#include <color_fragment>
+        {
+          // 季節：夏は濃い緑、秋は枯れ色、冬は平らなところに雪
+          vec3 c = diffuseColor.rgb;
+          float grass = step(c.r, c.g) * step(0.6, vTerrWorld.y);
+          c = mix(c, c * vec3(0.82, 0.97, 0.78), grass * uSummer * 0.7);
+          c = mix(c, vec3(0.62, 0.6, 0.3) * (0.85 + 0.3 * c.g), grass * uAutumn * 0.3);
+          float snow = uSnow * smoothstep(0.72, 0.9, vTerrUp) * step(0.4, vTerrWorld.y);
+          c = mix(c, vec3(0.93, 0.95, 0.97), snow * 0.9);
+          diffuseColor.rgb = c;
+        }
         {
           float x = vTerrWorld.x, z = vTerrWorld.z, B = uBorder;
           float other = 0.0;

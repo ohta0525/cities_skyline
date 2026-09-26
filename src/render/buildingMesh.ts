@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { ENV, ENV_DECL } from './env';
 import { mulberry32 } from '../core/rng';
 import type { Building, BuildingKind } from '../city/buildings';
 
@@ -395,11 +396,12 @@ export function buildBuildingGeometry(b: Pick<Building, 'kind' | 'w' | 'd' | 'fl
 export function buildingMaterial(): THREE.MeshStandardMaterial {
   const mat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.82, metalness: 0 });
   mat.onBeforeCompile = (sh) => {
+    Object.assign(sh.uniforms, ENV);
     sh.vertexShader = sh.vertexShader
       .replace('#include <common>', '#include <common>\nattribute float aWin;\nvarying float vWin;\nvarying vec3 vObjPos;\nvarying vec3 vObjN;')
       .replace('#include <begin_vertex>', '#include <begin_vertex>\nvWin = aWin;\nvObjPos = position;\nvObjN = normal;');
     sh.fragmentShader = sh.fragmentShader
-      .replace('#include <common>', '#include <common>\nvarying float vWin;\nvarying vec3 vObjPos;\nvarying vec3 vObjN;')
+      .replace('#include <common>', `#include <common>\nvarying float vWin;\nvarying vec3 vObjPos;\nvarying vec3 vObjN;\nfloat gWinLight = 0.0;\n${ENV_DECL}`)
       .replace(
         '#include <color_fragment>',
         `#include <color_fragment>
@@ -427,8 +429,15 @@ export function buildingMaterial(): THREE.MeshStandardMaterial {
           vec3 glass = st == 3 ? vec3(0.34, 0.45, 0.56) : vec3(0.24, 0.3, 0.38);
           glass += 0.1 * fract(y / 17.0 + hc / 29.0);
           diffuseColor.rgb = mix(diffuseColor.rgb, pow(glass, vec3(2.2)), win);
-        }`,
-      );
+          // 夜は窓の半分ほどに明かりがともる
+          float cell = floor(y / 2.8) * 17.0 + floor(hc / 2.5) * 5.0 + floor(vObjPos.x * 0.07 + vObjPos.z * 0.05) * 3.0;
+          gWinLight = win * step(0.42, fract(sin(cell * 12.9898) * 43758.5453));
+        }
+        // 屋根に雪
+        if (vObjN.y > 0.5 && vObjPos.y > 1.2) diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.93, 0.95, 0.97), uSnow * 0.85);`,
+      )
+      .replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>
+        totalEmissiveRadiance += vec3(1.0, 0.72, 0.38) * gWinLight * uNight * 1.4;`);
   };
   return mat;
 }

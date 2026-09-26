@@ -20,6 +20,12 @@ import { RANKS, eraOf, yearOf } from './city/eras';
 import { AI_MAYORS, FACTIONS, PLEDGES, type PledgeId } from './city/politics';
 import { VICTORY, type VictoryChoice } from './city/defense';
 import { BORDER, EDGE_NAMES, STAGE_NAMES, stageOf } from './city/region';
+import { SCENARIOS, type ScenarioId } from './city/scenarios';
+import type { Ending } from './city/ending';
+import { fmLine } from './city/media';
+import { decreeActive } from './city/policies';
+import { Sound } from './audio/sound';
+import { ENV } from './render/env';
 import type { ElectionResult } from './city/politics';
 import * as THREE from 'three';
 import { MONTH_DAYS, YEAR_DAYS, dateOf, formatDate, seasonOf, type Speed, type YearMinutes } from './sim/clock';
@@ -48,7 +54,7 @@ worker.onmessage = (e: MessageEvent<FromWorker>) => {
   updateStats();
   // 月が変わるたびに自動保存
   const month = Math.floor(sim.day / MONTH_DAYS);
-  if (lastMonth >= 0 && month !== lastMonth) storeSave('auto', snapshot());
+  if (lastMonth >= 0 && month !== lastMonth && city.ending?.kind !== 'coup') storeSave('auto', snapshot());
   lastMonth = month;
 };
 
@@ -58,9 +64,9 @@ const world = new World3D(canvas, settings.quality, settings.miniature);
 city = new City(generateTerrain(1), 1);
 const view = new CityView(world, city);
 const tools = new Tools(world, city, view, canvas, { toast });
-const hall = new Panels(() => city, { toast, setInfo: (m) => view.setInfo(m) });
+const hall = new Panels(() => city, { toast, setInfo: (m) => view.setInfo(m), fm: () => fmLog, name: () => cityName });
 
-function startCity(save: SaveData): void {
+function startCity(save: SaveData, scenario?: ScenarioId): void {
   cityName = save.cityName;
   $<HTMLInputElement>('cityName').value = cityName;
   // 道路の造成で地形が変わっているので、毎回生成し直してから街を載せる
@@ -69,6 +75,8 @@ function startCity(save: SaveData): void {
   city.load(save.city, save.sim.day);
   city.disastersEnabled = settings.disasters;
   city.warEnabled = settings.war;
+  if (scenario) city.setupScenario(scenario);
+  fmLog.length = 0;
   world.setTerrain(terrain);
   view.setCity(city);
   tools.setCity(city);
@@ -129,6 +137,10 @@ function updateStats(): void {
   ap.textContent = `${city.politics.approval.toFixed(0)}％`;
   ap.className = `v ${city.politics.approval < 50 ? 'neg' : ''}`;
   $('rank').textContent = RANKS[city.meta.rank].name;
+  const sc = city.scenario;
+  $('goal').hidden = sc.id === 'sandbox';
+  $('goalName').textContent = sc.id === 'campaign' ? '目標：100 年続く街' : SCENARIOS[sc.id].name.replace('シナリオ：', '');
+  $('goalText').textContent = sc.id === 'campaign' ? city.scenarioProgress() : `${SCENARIOS[sc.id].goal}（${city.scenarioProgress()}）`;
   $('era').textContent = eraOf(yearOf(sim.day)).name;
   for (const [id, v] of [['dRes', st.demand.res], ['dCom', st.demand.com], ['dInd', st.demand.ind]] as const) {
     const el = $(id);
@@ -288,12 +300,29 @@ btnNew.onclick = () => {
     return;
   }
   disarm();
-  const s = freshCity();
-  startCity(s);
-  storeSave('auto', s);
   closePanels();
-  toast('新しい地形で街を始めました');
+  chooseMode();
 };
+
+/** 遊び方を選んで、新しい街を始める */
+function chooseMode(first = false): void {
+  const box = document.createElement('div');
+  box.className = 'modes';
+  for (const id of Object.keys(SCENARIOS) as ScenarioId[]) {
+    const b = document.createElement('button');
+    b.innerHTML = `<b>${SCENARIOS[id].name}</b><span>${SCENARIOS[id].intro}</span>`;
+    b.onclick = () => {
+      closeModal();
+      const s = freshCity();
+      startCity(s, id);
+      storeSave('auto', snapshot());
+      toast(`${SCENARIOS[id].name}を始めました`);
+      if (first && !settings.helpSeen) $('btnHelp').click();
+    };
+    box.append(b);
+  }
+  showModal(first ? '瑞穂の街へようこそ' : '新しい街を始める', [para(first ? '遊び方を選んでください。あとから設定の「新しい街を始める」で選び直せます。' : '遊び方を選んでください。'), box], first ? [] : [{ label: 'やめる' }]);
+}
 
 // ---------- 地形の情報（カーソルの下） ----------
 let pointer: { x: number; y: number } | null = null;
@@ -367,11 +396,16 @@ const para = (text: string, cls = '') => Object.assign(document.createElement('p
 
 let pledgeShown = false;
 function checkPolitics(): void {
-  const ev = city.events.shift();
+  // ダイアログが開いている間は、次の出来事を待たせる
+  const ev = $('modal').hidden ? city.events.shift() : undefined;
   if (ev?.type === 'election') showElection(ev.result);
   if (ev?.type === 'quake') showQuake(ev.report);
   if (ev?.type === 'disaster') showDisaster(ev.report);
-  if (ev?.type === 'war') showWar(ev);
+  if (ev?.type === 'war') { showWar(ev); if (ev.kind === 'declared') sound.alarm(); }
+  if (ev?.type === 'society') { sound.alarm(); showModal(ev.title, [para(ev.text)], [{ label: '政治パネルを開く', onClick: () => hall.toggle('politics', true) }, { label: '閉じる', primary: true }]); }
+  if (ev?.type === 'festival') showFestival();
+  if (ev?.type === 'scenario') showModal(ev.won ? 'シナリオ達成！' : 'シナリオ失敗', [para(ev.text), para('このまま街づくりを続けられます。設定の「新しい街を始める」から別のシナリオも選べます。', 'note')], [{ label: '続ける', primary: true }]);
+  if (ev?.type === 'ending') showEnding(ev.ending);
   updateAlert();
   updateWarBar();
   const p = city.politics;
@@ -394,12 +428,14 @@ function checkPolitics(): void {
   if (!p.pledgeChoiceOpen) pledgeShown = false;
 }
 
+let alarmedStorm = '';
 function updateAlert(): void {
   const st = city.activeStorm();
   const el = $('alert');
   el.hidden = !st;
   if (!st) return;
   const lv = alertLevel(st, city.day);
+  if (lv >= 4 && alarmedStorm !== st.name) { alarmedStorm = st.name; sound.alarm(); }
   const chip = $('alertLevel');
   chip.textContent = String(lv);
   chip.style.background = ALERT_COLORS[lv];
@@ -419,6 +455,29 @@ $('btnEvac').onclick = () => {
   const r = city.evacuate(!st?.evacuated);
   if (r) toast(r);
 };
+
+// ---------- 祭りとエンディング ----------
+function showFestival(): void {
+  showModal('夏祭りと花火大会', [
+    para('今年も夏祭りの季節です。8 月に夏祭りと花火大会を開きますか？'),
+    para('費用 2,000万円。1 か月のあいだ満足度が上がり、保守・伝統派が喜び、観光客でお店がうるおいます。夜には川の上に花火が上がります。', 'note'),
+  ], [
+    { label: '今年は見送る', onClick: () => city.holdSummerFestival(false) },
+    { label: '開く（2,000万円）', primary: true, onClick: () => { const r = city.holdSummerFestival(true); if (r) toast(r); } },
+  ]);
+}
+
+function showEnding(e: Ending): void {
+  const t = document.createElement('table');
+  t.className = 'ledger';
+  t.innerHTML = `<tr><th>項目</th><th>点</th></tr>${e.parts.map((p) => `<tr><td>${p.label}<br><span class="note">${p.note}</span></td><td>${p.score}／${p.max}</td></tr>`).join('')}`;
+  const head = document.createElement('div');
+  head.innerHTML = `<p class="score">${e.total}<span style="font-size:16px"> 点</span></p><p class="ending-title">${e.title}</p>`;
+  const buttons = e.kind === 'coup'
+    ? [{ label: '1 か月前に戻る', onClick: () => { const s = loadSave('auto'); if (s) { startCity(s); toast('1 か月前の自動保存から再開しました'); } else chooseMode(); } }, { label: '新しい街を始める', primary: true, onClick: () => chooseMode() }]
+    : [{ label: '新しい街を始める', onClick: () => chooseMode() }, { label: 'このまま続ける', primary: true }];
+  showModal(e.kind === 'coup' ? 'クーデター：市政の終わり' : '復興暦 100 年：街の評価', [head, para(e.summary), t], buttons);
+}
 
 // ---------- 紛争と合併 ----------
 function updateWarBar(): void {
@@ -553,6 +612,55 @@ function updateNeighborLabels(w: number, h: number): void {
   }
 }
 
+// ---------- 昼夜・音・FM ----------
+const sound = new Sound();
+sound.volume = settings.volume;
+sound.bgm = settings.bgm;
+sound.ambient = settings.ambient;
+const wake = () => sound.start();
+window.addEventListener('pointerdown', wake);
+window.addEventListener('keydown', wake);
+/** 見た目の時刻 0〜1（朝 7 時から） */
+let dayTime = 0.3;
+const DAY_SECONDS = 240;
+function updateDayTime(dt: number): void {
+  if (settings.dayNight && speed > 0) dayTime = (dayTime + (dt * Math.min(speed, 2)) / DAY_SECONDS) % 1;
+  const t = settings.dayNight ? dayTime : 0.5;
+  world.setDayTime(t);
+  const mins = Math.floor(t * 24 * 60);
+  const text = `${String(Math.floor(mins / 60)).padStart(2, '0')}:${String(mins % 60).padStart(2, '0')}`;
+  const tod = $('tod');
+  if (tod.textContent !== text) tod.textContent = text;
+  const d = dateOf(city.day);
+  view.fireworksOn = decreeActive(city.policies, 'festival', city.day) && d.month === 8;
+  sound.update({ time: t, season: seasonOf(d.month), rain: view.weather, paused: speed === 0, near: 1 - Math.min(1, world.controls.distance / 3000) });
+}
+const fmLog: { day: number; text: string }[] = [];
+let fmClock = 0;
+function updateFm(dt: number): void {
+  fmClock -= dt;
+  if (fmClock > 0) return;
+  fmClock = 18;
+  const text = fmLine(city, Math.random);
+  if (fmLog.at(-1)?.text === text) return;
+  fmLog.push({ day: city.day, text });
+  if (fmLog.length > 30) fmLog.shift();
+  $('fmText').textContent = text;
+}
+$('fm').onclick = () => hall.toggle('news', true);
+
+$<HTMLInputElement>(settings.dayNight ? 'dnOn' : 'dnOff').checked = true;
+document.querySelectorAll<HTMLInputElement>('input[name="dayNight"]').forEach((r) => {
+  r.onchange = () => { settings.dayNight = r.value === 'on'; saveSettings(settings); };
+});
+const vol = $<HTMLInputElement>('volume');
+vol.value = String(settings.volume);
+vol.oninput = () => { settings.volume = Number(vol.value); sound.setVolume(settings.volume); saveSettings(settings); };
+$<HTMLInputElement>('bgmOn').checked = settings.bgm;
+$<HTMLInputElement>('bgmOn').onchange = (e) => { settings.bgm = (e.target as HTMLInputElement).checked; sound.bgm = settings.bgm; saveSettings(settings); };
+$<HTMLInputElement>('ambOn').checked = settings.ambient;
+$<HTMLInputElement>('ambOn').onchange = (e) => { settings.ambient = (e.target as HTMLInputElement).checked; sound.ambient = settings.ambient; saveSettings(settings); };
+
 // ---------- ループ ----------
 window.addEventListener('resize', () => world.resize());
 let last = performance.now();
@@ -561,6 +669,8 @@ function frame(now: number): void {
   last = now;
   view.sync(sim.day);
   view.update(now / 1000, speed === 0 ? 0 : dt * Math.min(speed, 3));
+  updateDayTime(dt);
+  updateFm(dt);
   world.setWeather(view.weather);
   hall.update();
   checkPolitics();
@@ -571,7 +681,7 @@ function frame(now: number): void {
   requestAnimationFrame(frame);
 }
 
-window.addEventListener('beforeunload', () => { if (terrain) storeSave('auto', snapshot()); });
+window.addEventListener('beforeunload', () => { if (terrain && city.ending?.kind !== 'coup') storeSave('auto', snapshot()); });
 
 // 起動：前回の自動保存があれば続きから
 requestAnimationFrame(() => {
@@ -579,9 +689,10 @@ requestAnimationFrame(() => {
   startCity(resume ?? freshCity());
   setSpeed(1);
   $('loading').hidden = true;
-  if (!settings.helpSeen) $('btnHelp').click();
+  if (!resume) chooseMode(true);
+  else if (!settings.helpSeen) $('btnHelp').click();
   requestAnimationFrame(frame);
 });
 
 // 開発時だけ、ブラウザのコンソールから触れるようにする
-if (import.meta.env.DEV) Object.assign(window, { __world: world, __app: { get city() { return city; }, tools, view } });
+if (import.meta.env.DEV) Object.assign(window, { __world: world, __app: { get city() { return city; }, tools, view, sound, env: ENV, showEnding, setDayTime: (t: number) => { dayTime = t; } } });

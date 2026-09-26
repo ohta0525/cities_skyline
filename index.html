@@ -19,6 +19,7 @@
     <div class="clock">
       <span id="season" class="season">春</span>
       <span id="date" class="date">復興暦 1年 4月 1日</span>
+      <span id="tod" class="tod">12:00</span>
       <span id="era" class="era">再建期</span>
     </div>
     <div class="stats">
@@ -66,6 +67,23 @@
       </div>
     </fieldset>
     <fieldset>
+      <legend>昼と夜</legend>
+      <div class="seg" role="radiogroup">
+        <label><input type="radio" name="dayNight" id="dnOn" value="on"><span>移り変わる</span></label>
+        <label><input type="radio" name="dayNight" id="dnOff" value="off"><span>昼に固定</span></label>
+      </div>
+      <p class="note">見た目の昼夜は、年の進み方とは別に約 4 分で 1 日が回ります。</p>
+    </fieldset>
+    <fieldset>
+      <legend><label for="volume">音量</label></legend>
+      <input type="range" id="volume" min="0" max="1" step="0.05">
+      <div class="row">
+        <label class="check"><input type="checkbox" id="bgmOn"> 音楽（和風の lo-fi）</label>
+        <label class="check"><input type="checkbox" id="ambOn"> 環境音（セミ・虫・雨・風鈴）</label>
+      </div>
+      <p class="note">夕方 5 時には防災無線のチャイムが鳴ります。音は最初に画面をクリックしたときから出ます。</p>
+    </fieldset>
+    <fieldset>
       <legend><label for="miniature">ミニチュア効果（周辺のぼかし）</label></legend>
       <input type="range" id="miniature" min="0" max="1" step="0.05">
     </fieldset>
@@ -101,7 +119,7 @@
     </fieldset>
     <fieldset>
       <legend>新しい街</legend>
-      <p class="note">新しい地形を生成して、1 年目からやり直します。今の街は保存しない限り消えます。</p>
+      <p class="note">新しい地形を生成して、1 年目からやり直します。キャンペーン・サンドボックス・シナリオから選べます。今の街は保存しない限り消えます。</p>
       <button id="btnNew" class="danger">新しい街を始める</button>
     </fieldset>
   </aside>
@@ -132,10 +150,13 @@
       <li>左の「関係者」で私鉄社長や建設会社社長と関係を深めると見返りがあります（疑惑度に注意）</li>
       <li>台風や大雨の予報が出たら、上の警報の帯から「避難指示」を出せます。「防災」で堤防・防潮堤を高くし、「施設」の防災から避難タワーや仮設住宅を建てます</li>
       <li>左の「地域」で隣町と協定を結び、ふるさと納税の返礼品を決め、合併を申し入れられます。関係が悪いと緊張が高まり、封鎖や紛争になります。「防衛」で部隊を編成できます</li>
+      <li>不満がたまるとデモや暴動が起きます。強い防衛隊を持ちながら防衛派に見放されると、クーデターで市政が終わります（「政治」パネル）</li>
       <li>4 年ごとに市長選挙があります。「政治」で派閥の支持を見ながら、公約を掲げて再選を目指します</li>
     </ol>
   </aside>
 
+  <div id="goal" class="goal" hidden><b id="goalName"></b><span id="goalText"></span></div>
+  <button id="fm" class="fm" title="ローカル FM（新聞パネルで過去の放送も読めます）"><b>FM みずほ 76.5</b><span id="fmText"></span></button>
   <button id="ticker" class="ticker" title="新聞を開く"><b>地元紙</b><span id="tickerText"></span></button>
   <div id="warbar" class="warbar" hidden>
     <span class="lv">⚔</span>

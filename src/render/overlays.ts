@@ -3,11 +3,16 @@ import { DISTRICT_CELL, DN, type Districts } from '../city/districts';
 import { ZONES, cellCorners, type Cell } from '../city/zones';
 import { HALF, heightAt, type Terrain } from '../world/terrain';
 
+/** 区画・地区の色つきのマス（夜は暗くする） */
+export const OVERLAY_MATS: THREE.MeshBasicMaterial[] = [];
+
 function overlayMaterial(opacity: number): THREE.MeshBasicMaterial {
-  return new THREE.MeshBasicMaterial({
+  const m = new THREE.MeshBasicMaterial({
     vertexColors: true, transparent: true, opacity, depthWrite: false, side: THREE.DoubleSide,
     polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -8,
   });
+  OVERLAY_MATS.push(m);
+  return m;
 }
 
 const ZCOL = new Map(ZONES.map((z) => [z.id as number, new THREE.Color(z.color)]));

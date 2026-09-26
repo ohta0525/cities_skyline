@@ -44,6 +44,12 @@ import {
   type DefenseState, type UnitKind, type VictoryChoice, type War, type WarResult,
 } from './defense';
 import { IMPORT } from './services';
+import { SOCIETY_ACTIONS, coupMonth, newSociety, unrestMonth, unrestStage, type SocietyActionId, type SocietyState } from './society';
+import { CALENDAR, seasonLook, type SeasonLook } from './calendar';
+import { makeEdition, type Edition } from './media';
+import { SCENARIOS, newScenario, type ScenarioId, type ScenarioState } from './scenarios';
+import { coupEnding, evaluate, type Ending } from './ending';
+import { dateOf } from '../sim/clock';
 import { HALF } from '../world/terrain';
 import { RoadNetwork, halfWidth, type RoadPlan, type RoadType, type Snap, type RoadNode, type RoadSegment } from './roads';
 import { flattenRoad, type GridRange } from './terrainEdit';
@@ -119,6 +125,10 @@ export interface CityData {
   connections?: ConnectionsState;
   diplomacy?: DiplomacyState;
   defense?: DefenseState;
+  society?: SocietyState;
+  scenario?: ScenarioState;
+  ending?: Ending | null;
+  editions?: Edition[];
 }
 
 export interface DisasterReport {
@@ -190,6 +200,11 @@ export class City {
   displaced = 0;
   restricted: Restricted[] = [];
   diplomacy: DiplomacyState = newDiplomacy();
+  society: SocietyState = newSociety();
+  scenario: ScenarioState = newScenario();
+  /** 100 年目の評価、またはクーデターで終わったとき */
+  ending: Ending | null = null;
+  editions: Edition[] = [];
   defense: DefenseState = newDefense();
   /** 設定で戦争をなくせる（平和モード） */
   warEnabled = true;
@@ -213,6 +228,10 @@ export class City {
     | { type: 'quake'; report: QuakeReport }
     | { type: 'disaster'; report: DisasterReport }
     | { type: 'war'; kind: 'declared' | 'won' | 'lost' | 'peace' | 'merged' | 'refused'; name: string; text: string }
+    | { type: 'society'; title: string; text: string }
+    | { type: 'festival' }
+    | { type: 'scenario'; won: boolean; text: string }
+    | { type: 'ending'; ending: Ending }
   )[] = [];
   private nextBuildingId = 1;
   private rand: () => number;
@@ -235,6 +254,7 @@ export class City {
 
   /** プレイヤーが街を作れない理由（なければ null） */
   blockedReason(): string | null {
+    if (this.ending?.kind === 'coup') return 'クーデターで市政は終わりました';
     if (this.politics.mayor !== 'player') return `今は ${AI_MAYORS[this.politics.mayor].name} 市長の任期中です。次の選挙で返り咲いてください`;
     return null;
   }
@@ -659,6 +679,7 @@ export class City {
     // 隣町
     monthlyRegion(this.region, this.rand);
     this.diplomacyMonth(day);
+    this.calendarMonth(day);
 
     // 政治
     const jobs = s.comJobs + s.indJobs;
@@ -692,6 +713,8 @@ export class City {
     }
     this.lastJobs = jobs;
     if (aiActive) this.aiMonth(mayor as AiMayorType, day);
+    this.societyMonth(day);
+    this.scenarioMonth(day);
 
     // 選挙の 3 か月前：公約と対立候補
     const nextYear = yearOf(day) + 1;
@@ -726,6 +749,7 @@ export class City {
       refund(this.econ, RANKS[rank].grant);
       this.say(`${RANKS[rank].name}に昇格しました。国から ${formatYen(RANKS[rank].grant)} の交付金`, 'good');
     }
+    this.newspaperMonth();
     this.versions.economy++;
     this.recount();
   }
@@ -744,6 +768,12 @@ export class City {
       if (p.mayor === 'hawk') setTax(this.econ, 'res', t.res + 0.5);
     }
     if (isElectionYear(year)) this.election(year);
+    // 100 年目の終わり（101 年目の最初の日）に評価
+    if (year === 101 && this.scenario.id === 'campaign' && !this.ending) {
+      this.ending = evaluate(this);
+      this.say(`【百年】復興暦 100 年が終わりました。評価「${this.ending.title}」（${this.ending.total} 点）`, 'era');
+      this.events.push({ type: 'ending', ending: this.ending });
+    }
   }
 
   private election(year: number): void {
@@ -2012,6 +2042,10 @@ export class City {
     add('business', -this.traffic.congestion * 12 + Math.max(0, this.connections.rel.chamber - 30) / 8);
     if (decreeActive(this.policies, 'curfew', day)) add('progress', -15);
     this.defenseExtra(day, add);
+    const stage = unrestStage(this.society.unrest);
+    const unrest = [0, 0, -2, -5, -8][stage];
+    if (unrest) for (const id of ['business', 'labor', 'tradition', 'progress', 'green', 'defense'] as FactionId[]) add(id, unrest);
+    if (this.society.martialLaw) { add('progress', -20); add('business', -5); add('defense', 5); add('green', -5); }
     return extra;
   }
 
@@ -2327,6 +2361,18 @@ export class City {
   private seedSettlement(n: Neighbor, forced: boolean): number {
     const inStrip = (p: P2) => Math.abs(p.x) < HALF - 50 && Math.abs(p.z) < HALF - 50 &&
       (n.edge === 'west' ? p.x < -BORDER + 10 : n.edge === 'east' ? p.x > BORDER - 10 : p.z < -BORDER + 10 && Math.abs(p.x) < BORDER);
+    const mix: Record<Neighbor['kind'], [ZoneId, number][]> = {
+      village: [[1, 0.7], [3, 0.2], [5, 0.1]],
+      industrial: [[6, 0.35], [5, 0.2], [1, 0.3], [2, 0.15]],
+      tourism: [[4, 0.3], [3, 0.2], [1, 0.5]],
+      bedtown: [[1, 0.6], [2, 0.3], [3, 0.1]],
+      military: [[1, 0.5], [2, 0.2], [5, 0.3]],
+    };
+    return this.seedTown(inStrip, mix[n.kind], Math.min(1_800, Math.round(n.population * (forced ? 0.5 : 1))), n.kind === 'village' ? 45 : 30);
+  }
+
+  /** 範囲の中に、昔からある町の道路と家並みをつくる。住んでいる人数を返す */
+  seedTown(inStrip: (p: P2) => boolean, mix: [ZoneId, number][], target: number, age: number, roads = 18): number {
     const dry = (p: P2) => heightAt(this.terrain, p.x, p.z) > 1.5 && waterLevelAt(this.terrain, p.x, p.z) === null;
     // いちばん平らで乾いた場所（山あいなら谷底）を探す
     let seed: P2 | null = null, bestScore = Infinity;
@@ -2350,7 +2396,7 @@ export class City {
     const heads: { p: P2; dir: number }[] = [{ p: seed, dir: 0 }, { p: seed, dir: Math.PI }];
     const placed: P2[] = [seed];
     let built = 0;
-    for (let guard = 0; guard < 120 && built < 18 && heads.length; guard++) {
+    for (let guard = 0; guard < roads * 7 && built < roads && heads.length; guard++) {
       const h = heads.shift()!;
       const tries: [number, number][] = [];
       for (const len of [56 + Math.floor(this.rand() * 3) * 8, 40, 32]) {
@@ -2376,16 +2422,9 @@ export class City {
     this.afterRoadChange();
     const fresh = [...this.net.segments.keys()].filter((id) => !before.has(id));
     if (!fresh.length) return 0;
-    const mix: Record<Neighbor['kind'], [ZoneId, number][]> = {
-      village: [[1, 0.7], [3, 0.2], [5, 0.1]],
-      industrial: [[6, 0.35], [5, 0.2], [1, 0.3], [2, 0.15]],
-      tourism: [[4, 0.3], [3, 0.2], [1, 0.5]],
-      bedtown: [[1, 0.6], [2, 0.3], [3, 0.1]],
-      military: [[1, 0.5], [2, 0.2], [5, 0.3]],
-    };
     const pickZone = (): ZoneId => {
       let r = this.rand();
-      for (const [z, w] of mix[n.kind]) { if ((r -= w) <= 0) return z; }
+      for (const [z, w] of mix) { if ((r -= w) <= 0) return z; }
       return 1;
     };
     const freshSet = new Set(fresh);
@@ -2397,7 +2436,6 @@ export class City {
       cl.zone = blockZone.get(key)!;
     }
     // 家並みを一気に建てる（古い町なので建築年は昔）
-    const target = Math.min(1_800, Math.round(n.population * (forced ? 0.5 : 1)));
     const year = yearOf(this.day);
     let residents = 0, guard = 0;
     const known = new Set(this.buildings.keys());
@@ -2410,7 +2448,7 @@ export class City {
         const b = this.buildings.get(f.building)!;
         if (!b || known.has(b.id)) continue;
         known.add(b.id);
-        b.built = Math.max(1, year - Math.floor(this.rand() * (n.kind === 'village' ? 45 : 30)));
+        b.built = Math.max(1, year - Math.floor(this.rand() * age));
         b.seismic = b.built >= SEISMIC_LAW_YEAR ? 'new' : 'old';
         b.day = this.day - 10;
         residents += b.residents;
@@ -2419,6 +2457,8 @@ export class City {
     this.seeding = false;
     this.versions.cells++;
     this.versions.buildings++;
+    this.refreshServices();
+    this.recount();
     return residents;
   }
 
@@ -2688,6 +2728,288 @@ export class City {
     if (this.defense.tribute && day < this.defense.tribute.until) for (const id of ['business', 'labor', 'tradition', 'defense'] as FactionId[]) add(id, -4);
   }
 
+  // ---------- 街の不満と治安、クーデター ----------
+  /** 月ごとの不満・暴動・クーデター */
+  private societyMonth(day: number): void {
+    const s = this.society;
+    const st = this.stats;
+    const before = unrestStage(s.unrest);
+    unrestMonth(s, {
+      happiness: st.happiness, unemployment: st.unemployment, approval: this.politics.approval,
+      displacedShare: st.population ? this.displaced / st.population : 0, crime: this.services?.crime ?? 0,
+      curfew: decreeActive(this.policies, 'curfew', day), martialLaw: s.martialLaw, tribute: !!this.defense.tribute,
+      atWar: !!this.defense.war, festival: decreeActive(this.policies, 'festival', day),
+    });
+    // 小さな町や、できたばかりの街では暴動にまではならない
+    const pop = st.population;
+    const cap = dateOf(day).year <= 2 || pop < 300 ? 44 : pop < 1_000 ? 64 : 100;
+    s.unrest = Math.min(s.unrest, cap);
+    if (cap < 85) s.extremists = false;
+    const stage = unrestStage(s.unrest);
+    if (stage > before) {
+      const text = ['', '市民の間に不満が広がっています', '駅前で市政に抗議するデモ。数千人が集まりました', '抗議が暴徒化。商店が襲われ、火の手が上がっています', '過激派が武装し、市の施設を狙っていると警察が警告'][stage];
+      if (text) this.say(`【治安】${text}`, 'bad');
+    } else if (stage < before && before >= 2) this.say('【治安】街の混乱が落ち着いてきました', 'good');
+    s.hotspot = null;
+    s.riotDistrict = null;
+    const blds = [...this.buildings.values()];
+    if (stage >= 2 && blds.length) {
+      // 人の集まる商業地に集まる
+      const com = blds.filter((b) => b.zone === 3 || b.zone === 4);
+      const at = (com.length ? com : blds)[Math.floor(this.rand() * (com.length || blds.length))];
+      s.hotspot = { x: at.x, z: at.z };
+      s.riotDistrict = this.districts.at(at)?.id ?? 0;
+    }
+    if (stage >= 3 && s.hotspot && this.rand() < 0.6) {
+      const near = blds.filter((b) => Math.hypot(b.x - s.hotspot!.x, b.z - s.hotspot!.z) < 180);
+      const n = Math.min(near.length, 1 + Math.floor(this.rand() * (stage === 4 ? 5 : 3)));
+      for (let k = 0; k < n; k++) {
+        const b = near.splice(Math.floor(this.rand() * near.length), 1)[0];
+        if (this.rand() < 0.4) this.startFire(b.id);
+        else b.damagedUntil = Math.max(b.damagedUntil ?? 0, day + 45);
+      }
+      s.riots++;
+      if (n) this.say(`【治安】暴動で建物 ${n} 棟が被害。商店は店を閉めています`, 'bad');
+      this.versions.buildings++;
+    }
+    if (stage >= 4) {
+      const targets = [...this.facilities.values()].filter((f) => ['koban', 'policeStation', 'garrison', 'thermal', 'waterworks'].includes(f.kind));
+      if (targets.length && this.rand() < 0.5) {
+        const f = targets[Math.floor(this.rand() * targets.length)];
+        f.downUntil = Math.max(f.downUntil, day + 60);
+        this.say(`【治安】過激派が${FACILITIES[f.kind].name}を襲撃。2 か月は使えません`, 'bad');
+        this.versions.facilities++;
+      }
+    }
+    // クーデター
+    if (this.politics.mayor === 'player' && !this.ending) {
+      const prev = s.coupRisk;
+      const risk = coupMonth(s, {
+        units: this.defense.units.length, power: this.militaryPower(), defenseSupport: this.politics.support.defense,
+        martialLaw: s.martialLaw, extremists: s.extremists, unrest: s.unrest,
+      });
+      if (prev < 40 && risk >= 40) this.say('【防衛隊】防衛隊の幹部が市政への不満を口にしている、と関係者が明かしました', 'bad');
+      if (prev < 70 && risk >= 70) {
+        this.say('【防衛隊】防衛隊の一部が不穏な動き。クーデターの恐れがあります（「政治」パネルで対応を）', 'bad');
+        this.events.push({ type: 'society', title: 'クーデターの恐れ', text: '防衛隊の一部に不穏な動きがあります。防衛派の支持が低いまま強い軍を持ち続けると、防衛隊が市役所を占拠するかもしれません。「政治」パネルの「治安と防衛隊」から、待遇改善や幹部の人事異動で危険を下げてください。' });
+      }
+      if (risk >= 100) {
+        this.ending = coupEnding(this);
+        this.say('【クーデター】防衛隊が市役所を占拠。市長は職を追われました', 'bad');
+        this.events.push({ type: 'ending', ending: this.ending });
+      }
+    }
+  }
+
+  /** 治安と防衛隊への手段 */
+  societyAction(id: SocietyActionId): string | null {
+    const blocked = this.blockedReason();
+    if (blocked) return blocked;
+    const s = this.society;
+    const def = SOCIETY_ACTIONS[id];
+    if ((s.cooldowns[id] ?? 0) > this.day) return `あと ${Math.ceil((s.cooldowns[id] - this.day) / 30)} か月は使えません`;
+    const until = this.day + 360;
+    switch (id) {
+      case 'dialogue':
+        if (this.econ.money < 500) return '資金が足りません（必要 500万円）';
+        spend(this.econ, 500, 'other'); s.unrest = Math.max(0, s.unrest - 12);
+        this.say('市長が対話集会を開き、市民の声を直接聞きました', 'politics'); break;
+      case 'handout': {
+        const cost = Math.round(this.stats.population * 0.3);
+        if (this.econ.money < cost) return `資金が足りません（必要 ${formatYen(cost)}）`;
+        spend(this.econ, cost, 'other'); s.unrest = Math.max(0, s.unrest - 20);
+        addModifier(this.politics, 'business', -3, until, '生活支援金'); addModifier(this.politics, 'tradition', -2, until, '生活支援金');
+        this.say(`市民に生活支援金を配りました（${formatYen(cost)}）`, 'politics'); break;
+      }
+      case 'crackdown':
+        if (!this.hasFacility('policeStation') && unitCount(this.defense, 'mobile') === 0) return '警察署か機動隊が必要です';
+        s.unrest = Math.max(0, s.unrest - 30); s.extremists = false;
+        addModifier(this.politics, 'progress', -10, until, '強硬な鎮圧'); addModifier(this.politics, 'green', -4, until, '強硬な鎮圧');
+        addModifier(this.politics, 'tradition', 3, until, '治安の回復');
+        this.say('機動隊がデモを鎮圧。「やりすぎだ」との批判も', 'politics'); break;
+      case 'treatment':
+        if (this.econ.money < 3_000) return '資金が足りません（必要 3,000万円）';
+        spend(this.econ, 3_000, 'other'); s.coupRisk = Math.max(0, s.coupRisk - 15);
+        addModifier(this.politics, 'defense', 10, until, '防衛隊の待遇改善');
+        this.say('防衛隊の給与と装備を改善しました', 'politics'); break;
+      case 'reshuffle': {
+        if (!this.defense.units.length) return '部隊がありません';
+        s.coupRisk = Math.max(0, s.coupRisk - 25);
+        const u = this.defense.units.find((x) => x.kind !== 'rescue') ?? this.defense.units[0];
+        this.defense.units.splice(this.defense.units.indexOf(u), 1);
+        addModifier(this.politics, 'defense', -5, until, '幹部の人事異動');
+        this.say(`防衛隊の幹部を異動させ、${UNITS[u.kind].name}を 1 つ解散しました`, 'politics');
+        this.versions.war++; break;
+      }
+    }
+    s.cooldowns[id] = this.day + def.cooldown;
+    this.versions.economy++;
+    return null;
+  }
+
+  /** 戒厳令を出す・解く */
+  toggleMartialLaw(): string | null {
+    const blocked = this.blockedReason();
+    if (blocked) return blocked;
+    const s = this.society;
+    if (!s.martialLaw && this.defense.units.length < 2) return '部隊が 2 つ以上必要です';
+    s.martialLaw = !s.martialLaw;
+    this.say(s.martialLaw ? '【戒厳令】市全域に戒厳令。防衛隊が街に出て、集会が禁止されました' : '戒厳令を解除しました', 'politics');
+    this.versions.economy++;
+    return null;
+  }
+
+  // ---------- 季節と年中行事 ----------
+  private calendarMonth(day: number): void {
+    const d = dateOf(day);
+    const ev = CALENDAR.find((e) => e.month === d.month);
+    const shrine = this.hasFacility('shrine');
+    const until = day + 60;
+    if (ev) {
+      if (d.month === 1 && shrine) { addModifier(this.politics, 'tradition', 3, until, '初詣'); this.say(`【初詣】${ev.text}`, 'good'); }
+      else if (d.month === 10 && shrine) { addModifier(this.politics, 'tradition', 3, until, '秋祭り'); this.say(`【秋祭り】${ev.text}`, 'good'); }
+      else if (d.month !== 8 && d.month !== 10 && d.month !== 1) this.say(`【季節】${ev.text}`, 'info');
+    }
+    // 夏祭り：7 月に開くかどうかを決め、8 月に開く
+    if (d.month === 7) {
+      if (this.politics.mayor === 'player') this.events.push({ type: 'festival' });
+      else this.holdSummerFestival(this.econ.money > 20_000);
+    }
+    if (d.month === 8 && this.society.festivalYear === d.year) {
+      this.policies.decrees.festival = day + 30;
+      addModifier(this.politics, 'tradition', 5, day + 90, '夏祭り');
+      refund(this.econ, Math.round(this.stats.population * 0.1));
+      this.say('【夏祭り】夏祭りと花火大会。夜空に大輪の花火が上がりました', 'good');
+    }
+    if (!this.disastersEnabled) return;
+    // 大雪（12〜2 月）と猛暑（8 月）
+    if ((d.month === 12 || d.month <= 2) && this.rand() < 0.2) {
+      let km = 0;
+      for (const seg of this.net.segments.values()) km += curveLength(this.net.curveOf(seg)) / 1000;
+      const cost = Math.round(km * 40);
+      spend(this.econ, cost, 'other');
+      this.society.snowUntil = day + 12;
+      this.say(`【大雪】記録的な大雪。除雪に ${formatYen(cost)}。交通が乱れています`, 'bad');
+    }
+    if (d.month === 8 && this.rand() < 0.3) {
+      const health = this.services?.coverage.health ?? 0;
+      this.society.heatUntil = day + 20;
+      this.say(health < 0.5 ? '【猛暑】猛暑日が続き、熱中症で運ばれるお年寄りが相次いでいます。病院が足りません' : '【猛暑】猛暑日が続いています。病院は熱中症の患者で忙しくなっています', health < 0.5 ? 'bad' : 'info');
+    }
+  }
+
+  /** 夏祭りと花火大会を開くか（7 月に決める。2,000万円） */
+  holdSummerFestival(accept: boolean): string | null {
+    const year = dateOf(this.day).year;
+    if (!accept) { this.say('今年の夏祭りは見送りになりました', 'politics'); return null; }
+    if (this.econ.money < 2_000) return '資金が足りません（必要 2,000万円）';
+    spend(this.econ, 2_000, 'other');
+    this.society.festivalYear = year;
+    this.say('8 月に夏祭りと花火大会を開くことが決まりました', 'good');
+    this.versions.economy++;
+    return null;
+  }
+
+  /** 見た目の季節（描画用） */
+  seasonLook(): SeasonLook {
+    const look = seasonLook(this.day);
+    if (this.day < this.society.snowUntil) look.snow = Math.max(look.snow, 1);
+    return look;
+  }
+
+  // ---------- 地元紙 ----------
+  private newspaperMonth(): void {
+    const no = (this.editions.at(-1)?.no ?? 0) + 1;
+    this.editions.push(makeEdition(this, no, this.rand));
+    if (this.editions.length > 24) this.editions.shift();
+  }
+
+  // ---------- シナリオとエンディング ----------
+  /** 新しい街を始めるときに、シナリオの舞台を用意する */
+  setupScenario(id: ScenarioId): void {
+    this.scenario = newScenario(id);
+    if (id === 'sandbox') { this.econ.money = SANDBOX_MONEY; return; }
+    if (id === 'tsunami') {
+      const t = this.terrain;
+      const coast = (x: number) => t.coastZ[Math.max(0, Math.min(t.coastZ.length - 1, Math.round(((x + HALF) / (HALF * 2)) * (t.coastZ.length - 1))))];
+      const inArea = (p: P2) => Math.abs(p.x) < 460 && p.z < coast(p.x) - 50 && p.z > coast(p.x) - 380 && this.ownsLand(p);
+      this.seedTown(inArea, [[1, 0.55], [3, 0.2], [5, 0.15], [2, 0.1]], 1_600, 40, 22);
+      this.say('【シナリオ】海辺の古い港町。専門家は「12 年以内に巨大津波が来る」と警告しています', 'politics');
+    }
+    if (id === 'village') {
+      const north = this.neighbor('north')!;
+      north.kind = 'village';
+      north.population = 950;
+      this.mergeNeighbor(north, false);
+      this.econ.money = 40_000;
+      this.say('【シナリオ】山あいの村と合併した小さな市。借金を抱えての出発です', 'politics');
+    }
+    if (id === 'peace') {
+      const west = this.neighbor('west')!;
+      west.kind = 'military';
+      west.population = 15_000;
+      west.military = 320;
+      west.tension = 72;
+      west.relation = -60;
+      west.name = west.name.replace(/[町村]$/, '市');
+      this.say(`【シナリオ】西の軍事都市・${west.name}との緊張が高まっています。戦わずに収められるか`, 'politics');
+    }
+    this.events = this.events.filter((e) => e.type !== 'war');
+    this.versions.territory++;
+    this.versions.economy++;
+  }
+
+  /** シナリオの目標の進み具合 */
+  scenarioProgress(): string {
+    const sc = this.scenario;
+    const def = SCENARIOS[sc.id];
+    if (sc.result) return sc.result === 'won' ? '達成！' : '失敗';
+    const year = dateOf(this.day).year;
+    const left = def.years ? `あと ${Math.max(0, def.years - year + 1)} 年` : '';
+    if (sc.id === 'village') return `人口 ${this.stats.population.toLocaleString()}／3,000・${left}`;
+    if (sc.id === 'peace') return `西の町の緊張 ${Math.round(this.neighbor('west')?.tension ?? 0)}／20 未満・${left}`;
+    if (sc.id === 'tsunami') return `避難所 ${this.shelterCapacity().toLocaleString()} 人分・${left}`;
+    if (sc.id === 'campaign') return `100 年目まであと ${Math.max(0, 100 - year + 1)} 年`;
+    return '';
+  }
+
+  private scenarioMonth(day: number): void {
+    const sc = this.scenario;
+    if (sc.id === 'sandbox') { this.econ.money = Math.max(this.econ.money, SANDBOX_MONEY); this.econ.bankrupt = false; return; }
+    if (sc.result) return;
+    const year = dateOf(day).year;
+    const def = SCENARIOS[sc.id];
+    const finish = (won: boolean, text: string) => {
+      sc.result = won ? 'won' : 'lost';
+      sc.note = text;
+      this.say(`【シナリオ】${text}`, won ? 'good' : 'bad');
+      this.events.push({ type: 'scenario', won, text });
+    };
+    if (sc.id === 'tsunami' && year === 12 && dateOf(day).month === 9) {
+      const had = this.disasterReports.length;
+      this.earthquake(8.5, { x: 0, z: 4200 });
+      const r = this.disasterReports.slice(had).find((x) => x.kind === 'tsunami');
+      const stranded = r?.stranded ?? 0;
+      finish(stranded <= 50, stranded <= 50
+        ? `巨大津波が街を襲いましたが、逃げ遅れは ${stranded} 人。備えが街を守りました`
+        : `巨大津波で ${stranded} 人が逃げ遅れました。備えが間に合いませんでした`);
+    }
+    if (sc.id === 'village') {
+      sc.bankruptMonths += this.econ.bankrupt ? 1 : 0;
+      if (sc.bankruptMonths >= 12) finish(false, '財政再生団体から抜け出せず、立て直しは失敗しました');
+      else if (this.stats.population >= 3_000) finish(true, `人口が ${this.stats.population.toLocaleString()} 人に。村は街に生まれ変わりました`);
+      else if (year > def.years!) finish(false, `15 年たっても人口は ${this.stats.population.toLocaleString()} 人。目標に届きませんでした`);
+    }
+    if (sc.id === 'peace') {
+      const west = this.neighbor('west');
+      if (this.defense.war || this.defense.records.length) finish(false, '紛争が起きてしまいました');
+      else if (year > def.years!) {
+        const t = west?.tension ?? 0;
+        finish(t < 20 || !!west?.merged, t < 20 || west?.merged ? '10 年間、一度も戦わずに隣町との緊張を収めました' : `10 年たっても緊張は ${Math.round(t)}。和解には至りませんでした`);
+      }
+    }
+  }
+
   // ---------- 集計 ----------
   recount(): void {
     let population = 0, comJobs = 0, indJobs = 0, oldSeismic = 0;
@@ -2718,8 +3040,10 @@ export class City {
     const smoke = (this.policies.districts[0] ?? []).includes('noSmoking') ? 1 : 0;
     const curfew = decreeActive(this.policies, 'curfew', this.day) ? -3 : 0;
     const saving = decreeActive(this.policies, 'powerSaving', this.day) ? -2 : 0;
+    const society = (this.society.martialLaw ? -8 : 0) + (this.day < this.society.snowUntil ? -3 : 0)
+      + (this.day < this.society.heatUntil && (this.services?.coverage.health ?? 0) < 0.5 ? -3 : 0);
     const commutePenalty = Math.max(0, this.traffic.avgCommute - 18) * 0.5 + (population ? Math.min(15, (this.displaced / population) * 40) : 0);
-    const happiness = clamp01(base - commutePenalty - unemployment * 100 - (t.res - DEFAULT_TAXES.res) * 2.5 - (this.econ.bankrupt ? 15 : 0) + festival + smoke + curfew + saving);
+    const happiness = clamp01(base - commutePenalty - unemployment * 100 - (t.res - DEFAULT_TAXES.res) * 2.5 - (this.econ.bankrupt ? 15 : 0) + festival + smoke + curfew + saving + society);
     const connected = this.region.neighbors.some((n) => n.connected);
     this.stats = {
       population, comJobs, indJobs, buildings: this.buildings.size,
@@ -2799,6 +3123,10 @@ export class City {
       restricted: this.restricted.slice(),
       stormNo: this.stormNo,
       diplomacy: structuredClone(this.diplomacy),
+      society: structuredClone(this.society),
+      scenario: { ...this.scenario },
+      ending: this.ending ? structuredClone(this.ending) : null,
+      editions: structuredClone(this.editions),
       defense: structuredClone(this.defense),
     };
   }
@@ -2850,6 +3178,10 @@ export class City {
     if (data.region) this.region = normalizeRegion(structuredClone(data.region));
     if (data.diplomacy) this.diplomacy = { ...newDiplomacy(), ...structuredClone(data.diplomacy) };
     if (data.defense) this.defense = { ...newDefense(), ...structuredClone(data.defense) };
+    if (data.society) this.society = { ...newSociety(), ...structuredClone(data.society) };
+    if (data.scenario) this.scenario = { ...newScenario(), ...data.scenario };
+    this.ending = data.ending ? structuredClone(data.ending) : null;
+    this.editions = structuredClone(data.editions ?? []);
     this.versions.territory++;
     if (data.news) this.news = data.news.slice();
     if (data.meta) this.meta = { ...data.meta };
@@ -2863,6 +3195,9 @@ export class City {
     this.lastJobs = this.stats.comJobs + this.stats.indJobs;
   }
 }
+
+/** サンドボックスの資金（9,999億円） */
+const SANDBOX_MONEY = 99_990_000;
 
 const EDGE_LABEL: Record<Edge, string> = { west: '西', east: '東', north: '北の山側' };
 

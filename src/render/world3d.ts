@@ -14,6 +14,7 @@ import { buildDiorama, buildNameplate } from './diorama';
 import { buildTerrainMesh, setTerritory, updateTerrainRegion } from './terrainMesh';
 import { buildTrees, clearTrees } from './trees';
 import { buildRiver, buildSea, createWaterMaterial } from './water';
+import { ENV } from './env';
 
 const BG = new THREE.Color('#c8d5d3');
 const SUN_DIR = new THREE.Vector3(-0.55, 0.78, 0.35).normalize();
@@ -55,7 +56,11 @@ export class World3D {
   private shakeTotal = 1;
   private shakeAmp = 0;
   private hemi!: THREE.HemisphereLight;
+  private fill = new THREE.DirectionalLight('#dce8ff', 0.7);
   private weather = 0;
+  /** 見た目の時刻 0〜1（0.5 が正午） */
+  private dayTime = 0.5;
+  private sunDir = SUN_DIR.clone();
 
   constructor(private canvas: HTMLCanvasElement, quality: Quality, miniature: number) {
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: false, powerPreference: 'high-performance' });
@@ -74,9 +79,8 @@ export class World3D {
     this.sun.shadow.camera.near = 10;
     this.sun.shadow.camera.far = 6000;
     // 反対側から弱い補助光を当てて、影側の断面もつぶれないようにする
-    const fill = new THREE.DirectionalLight('#dce8ff', 0.7);
-    fill.position.set(0.6, 0.5, -0.4);
-    this.scene.add(this.sun, this.sun.target, fill, this.worldGroup);
+    this.fill.position.set(0.6, 0.5, -0.4);
+    this.scene.add(this.sun, this.sun.target, this.fill, this.worldGroup);
 
     this.controls = new CameraController(
       this.camera,
@@ -201,7 +205,7 @@ export class World3D {
     const t = this.controls.target;
     const extent = Math.min(1800, Math.max(260, d * 2.2));
     this.sun.target.position.copy(t);
-    this.sun.position.copy(t).addScaledVector(SUN_DIR, 3000);
+    this.sun.position.copy(t).addScaledVector(this.sunDir, 3000);
     if (Math.abs(extent - this.shadowExtent) > extent * 0.05) {
       const cam = this.sun.shadow.camera;
       cam.left = -extent; cam.right = extent; cam.top = extent; cam.bottom = -extent;
@@ -274,11 +278,35 @@ export class World3D {
   /** 天気（0：晴れ〜1：嵐）。光を弱め、空を暗くする */
   setWeather(k: number): void {
     this.weather += (k - this.weather) * 0.05;
+    this.applyLight();
+  }
+
+  /** 見た目の時刻（0〜1、0.5 が正午）。年の進み方とは別に回す */
+  setDayTime(t: number): void {
+    this.dayTime = ((t % 1) + 1) % 1;
+    this.applyLight();
+  }
+
+  /** 昼夜と天気から、太陽・空・霧の色を決める */
+  private applyLight(): void {
     const w = this.weather;
-    this.sun.intensity = 3.1 * (1 - w * 0.75);
-    this.hemi.intensity = 1.25 * (1 - w * 0.35);
+    const a = (this.dayTime - 0.25) * Math.PI * 2;
+    const e = Math.sin(a);
+    const day = THREE.MathUtils.smoothstep(e, -0.12, 0.25);
+    const dusk = Math.exp(-((e / 0.2) ** 2)) * (1 - w);
+    // 太陽は東から昇って西へ沈む。夜は月の光（向きは固定）
+    const sunDir = new THREE.Vector3(-Math.cos(a) * 0.85 - 0.2, Math.max(0.12, e) * 0.95, 0.4).normalize();
+    this.sunDir.copy(SUN_DIR).lerp(sunDir, day).normalize();
+    const sunColor = new THREE.Color('#ff9a5a').lerp(new THREE.Color('#fff0d8'), THREE.MathUtils.smoothstep(e, 0, 0.5));
+    this.sun.color.copy(new THREE.Color('#9fb4e8').lerp(sunColor, day));
+    this.sun.intensity = (0.45 + 2.65 * day) * (1 - w * 0.75);
+    this.hemi.intensity = (0.4 + 0.85 * day) * (1 - w * 0.35);
+    this.hemi.color.copy(new THREE.Color('#44557f').lerp(new THREE.Color('#e4f0ff'), day));
+    this.hemi.groundColor.copy(new THREE.Color('#25232c').lerp(new THREE.Color('#8c7a5c'), day));
+    this.fill.intensity = 0.7 * (0.35 + 0.65 * day);
+    ENV.uNight.value = 1 - day;
     const bg = (this.scene.background as THREE.Color);
-    bg.set('#c8d5d3').lerp(new THREE.Color('#6d7880'), w);
+    bg.set('#c8d5d3').lerp(new THREE.Color('#e9b894'), dusk * 0.75).lerp(new THREE.Color('#1d2638'), 1 - day).lerp(new THREE.Color('#6d7880'), w * (0.4 + 0.6 * day));
     (this.scene.fog as THREE.Fog).color.copy(bg);
     (this.scene.fog as THREE.Fog).near = 5000 - w * 4200;
     (this.scene.fog as THREE.Fog).far = 14000 - w * 11000;

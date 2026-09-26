@@ -20,6 +20,9 @@ import { ACTIONS, NPCS, REQUESTS, type ActionId, type NpcId } from '../city/conn
 
 import { ALERT_NAMES, alertLevel, SEAWALL_HEIGHTS } from '../city/water';
 import { FACILITIES } from '../city/facilities';
+import { SOCIETY_ACTIONS, UNREST_COLORS, UNREST_NAMES, unrestStage, type SocietyActionId } from '../city/society';
+import { voices } from '../city/media';
+import { mulberry32 } from '../core/rng';
 
 export type PanelId = 'finance' | 'people' | 'politics' | 'region' | 'defense' | 'transport' | 'npc' | 'policy' | 'disaster' | 'info' | 'news';
 
@@ -70,7 +73,7 @@ export class Panels {
   private lastRender = 0;
   private policyDistrict = 0;
 
-  constructor(private getCity: () => City, private ui: { toast: (m: string) => void; setInfo: (m: InfoMode) => void }) {
+  constructor(private getCity: () => City, private ui: { toast: (m: string) => void; setInfo: (m: InfoMode) => void; fm: () => { day: number; text: string }[]; name: () => string }) {
     document.querySelectorAll<HTMLButtonElement>('.rail button[data-panel]').forEach((b) => {
       b.onclick = () => this.toggle(b.dataset.panel as PanelId);
     });
@@ -95,7 +98,7 @@ export class Panels {
     });
     const badge = document.getElementById('newsBadge')!;
     badge.hidden = this.open === 'news' || c.versions.news <= this.seenNews || !c.news.length;
-    document.getElementById('politicsBadge')!.hidden = !c.politics.pledgeChoiceOpen;
+    document.getElementById('politicsBadge')!.hidden = !c.politics.pledgeChoiceOpen && unrestStage(c.society.unrest) < 2 && c.society.coupRisk < 40;
     document.getElementById('npcBadge')!.hidden = !c.connections.requests.length;
     document.getElementById('disasterBadge')!.hidden = !c.activeStorm() && c.displaced < 50;
     document.getElementById('regionBadge')!.hidden = !c.diplomacy.demands.length;
@@ -207,7 +210,30 @@ export class Panels {
     el.append(h('p', { cls: 'note' }, '旧耐震の建物は、のちの地震（P3）で壊れやすくなります。新耐震基準は 31 年目に施行されます。'));
   }
 
+  private societySection(c: City, el: HTMLElement): void {
+    const so = c.society;
+    const blocked = !!c.blockedReason();
+    const act = (r: string | null) => { if (r) this.ui.toast(r); this.seen = -1; };
+    const st = unrestStage(so.unrest);
+    el.append(h('h3', {}, '治安と防衛隊'));
+    el.append(
+      row('市民の不満', h('span', { cls: 'v' }, bar(so.unrest, 100, UNREST_COLORS[st]), ` ${Math.round(so.unrest)}・${UNREST_NAMES[st]}`), st >= 2 ? 'neg' : ''),
+      row('クーデターの危険', h('span', { cls: 'v' }, bar(so.coupRisk, 100, so.coupRisk >= 70 ? '#d9573f' : so.coupRisk >= 40 ? '#e8b83e' : '#6fb1d9'), ` ${Math.round(so.coupRisk)}`), so.coupRisk >= 40 ? 'neg' : ''),
+    );
+    if (so.martialLaw) el.append(h('p', { cls: 'alert' }, '戒厳令が出ています。不満は抑えられますが、満足度と革新派の支持が大きく下がり、クーデターの危険も高まります。'));
+    el.append(h('p', { cls: 'note' }, '不満は満足度・失業・支持率・住まいを失った人・治安で決まり、デモ → 暴動 → 過激派の武装化と進みます（人口 1,000 人未満の町では暴動にはなりません）。部隊が 4 つ以上あるのに防衛派の支持が低いと、クーデターの危険が高まります。'));
+    for (const id of Object.keys(SOCIETY_ACTIONS) as SocietyActionId[]) {
+      const def = SOCIETY_ACTIONS[id];
+      const cd = so.cooldowns[id] ?? 0;
+      const wait = cd > c.day ? `（${Math.ceil((cd - c.day) / 30)} か月後）` : '';
+      el.append(h('div', { cls: 'policy-row' }, h('button', { onclick: () => act(c.societyAction(id)), disabled: blocked || !!wait }, def.name + wait), h('p', { cls: 'note' }, def.note)));
+    }
+    el.append(h('div', { cls: 'policy-row' }, h('button', { onclick: () => act(c.toggleMartialLaw()), disabled: blocked, ariaPressed: String(so.martialLaw) }, so.martialLaw ? '戒厳令を解く' : '戒厳令'),
+      h('p', { cls: 'note' }, '部隊が 2 つ以上必要。不満を毎月大きく下げるが、満足度 −8、革新派 −20、経済界 −5。防衛隊が街に出る')));
+  }
+
   private politics(c: City, el: HTMLElement): void {
+    this.societySection(c, el);
     const p = c.politics;
     const year = yearOf(c.day);
     let next = year + 1;
@@ -611,10 +637,45 @@ export class Panels {
     }
   }
 
+  private newsTab: 'paper' | 'list' | 'fm' | 'voices' = 'paper';
+
   private newsList(c: City, el: HTMLElement): void {
+    const tabs = h('div', { cls: 'tabs' });
+    for (const [id, label] of [['paper', '紙面'], ['list', '記事'], ['fm', 'FM'], ['voices', '市民の声']] as const) {
+      tabs.append(h('button', { ariaPressed: String(this.newsTab === id), onclick: () => { this.newsTab = id; this.seen = -1; this.render(); } }, label));
+    }
+    el.append(tabs);
+    if (this.newsTab === 'paper') {
+      const ed = c.editions.at(-1);
+      if (!ed) { el.append(h('p', { cls: 'note' }, '月の初めに最初の新聞が届きます。')); return; }
+      const paper = h('div', { cls: 'paper' },
+        h('div', { cls: 'mast' }, h('b', {}, `${this.ui.name()}新報`), h('span', {}, `${formatDate(dateOf(ed.day))}　第 ${ed.no} 号`)),
+        h('h4', {}, ed.headline),
+        h('ul', {}, ...ed.subs.map((t) => h('li', {}, t))),
+        h('p', { cls: 'col' }, h('b', {}, '社説'), ed.column));
+      el.append(paper);
+      if (c.editions.length > 1) {
+        el.append(h('h3', {}, 'これまでの一面'));
+        for (const e of [...c.editions].reverse().slice(1, 12)) el.append(row(`第 ${e.no} 号`, e.headline));
+      }
+      return;
+    }
+    if (this.newsTab === 'fm') {
+      el.append(h('p', { cls: 'note' }, 'FM みずほ 76.5。DJ タケシが街の出来事を少し皮肉まじりに伝えます。'));
+      const log = this.ui.fm();
+      if (!log.length) el.append(h('p', { cls: 'note' }, 'まだ放送がありません。'));
+      for (const l of [...log].reverse()) el.append(h('div', { cls: 'fmlog' }, h('time', {}, formatDate(dateOf(l.day))), l.text));
+      return;
+    }
+    if (this.newsTab === 'voices') {
+      el.append(h('p', { cls: 'note' }, '市民の SNS から、いま多い声を集めました。'));
+      for (const v of voices(c, 8, mulberry32(Math.floor(c.day / 30) + 17))) el.append(h('div', { cls: `voice ${v.mood}` }, h('b', {}, `@${v.handle}`), h('p', {}, v.text)));
+      return;
+    }
     if (!c.news.length) { el.append(h('p', { cls: 'note' }, 'まだ記事はありません。')); return; }
     for (const n of [...c.news].reverse()) {
       el.append(h('article', { cls: `news ${n.kind}` }, h('time', {}, formatDate(dateOf(n.day))), h('p', {}, n.text)));
     }
   }
+
 }

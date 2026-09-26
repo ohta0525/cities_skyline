@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { ENV, ENV_DECL } from './env';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { mulberry32 } from '../core/rng';
 import { HALF, forestAt, heightAt, riverDistAt, type Terrain } from '../world/terrain';
@@ -62,15 +63,16 @@ export function buildTrees(t: Terrain, density: number): THREE.Group {
       (conifer ? cc : bc).push(color);
     }
   }
-  const mat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.9, flatShading: true });
+  const mat = seasonalTreeMaterial(false);
+  const matConifer = seasonalTreeMaterial(true);
   const g = new THREE.Group();
   g.name = 'trees';
-  for (const [geo, list, colors] of [
-    [coniferGeometry(), conifers, cc],
-    [broadleafGeometry(), broads, bc],
+  for (const [geo, list, colors, m] of [
+    [coniferGeometry(), conifers, cc, matConifer],
+    [broadleafGeometry(), broads, bc, mat],
   ] as const) {
     if (!list.length) continue;
-    const inst = new THREE.InstancedMesh(geo, mat, list.length);
+    const inst = new THREE.InstancedMesh(geo, m, list.length);
     const xz = new Float32Array(list.length * 2);
     list.forEach((mm, i) => {
       inst.setMatrixAt(i, mm);
@@ -88,6 +90,39 @@ export function buildTrees(t: Terrain, density: number): THREE.Group {
 }
 
 const HIDDEN = new THREE.Matrix4().makeScale(0, 0, 0);
+
+/** 季節で色の変わる木（広葉樹は桜と紅葉、どちらも雪をかぶる） */
+function seasonalTreeMaterial(conifer: boolean): THREE.MeshStandardMaterial {
+  const mat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.9, flatShading: true });
+  mat.onBeforeCompile = (sh) => {
+    Object.assign(sh.uniforms, ENV);
+    sh.vertexShader = sh.vertexShader
+      .replace('#include <common>', '#include <common>\nvarying float vSeed;\nvarying float vUp;')
+      .replace('#include <begin_vertex>', `#include <begin_vertex>
+        vUp = normal.y;
+        #ifdef USE_INSTANCING
+          vSeed = fract(sin(dot(instanceMatrix[3].xz, vec2(12.9898, 78.233))) * 43758.5453);
+        #else
+          vSeed = 0.5;
+        #endif`);
+    sh.fragmentShader = sh.fragmentShader
+      .replace('#include <common>', `#include <common>\nvarying float vSeed;\nvarying float vUp;\n${ENV_DECL}`)
+      .replace('#include <color_fragment>', `#include <color_fragment>
+        {
+          vec3 c = diffuseColor.rgb;
+          float leaf = step(c.r * 1.05, c.g);
+          ${conifer ? '' : `
+          vec3 sakura = mix(vec3(0.98, 0.72, 0.8), vec3(1.0, 0.86, 0.9), fract(vSeed * 7.0));
+          c = mix(c, sakura, leaf * uBlossom * step(0.45, vSeed));
+          vec3 momiji = vSeed < 0.33 ? vec3(0.78, 0.2, 0.1) : vSeed < 0.7 ? vec3(0.9, 0.5, 0.12) : vec3(0.88, 0.72, 0.2);
+          c = mix(c, momiji * (0.8 + 0.3 * fract(vSeed * 13.0)), leaf * uAutumn * 0.9);`}
+          c = mix(c, c * vec3(0.8, 0.95, 0.75), leaf * uSummer * 0.6);
+          c = mix(c, vec3(0.94, 0.96, 0.98), uSnow * smoothstep(0.2, 0.7, vUp) * 0.85);
+          diffuseColor.rgb = c;
+        }`);
+  };
+  return mat;
+}
 
 /** 範囲の中で test が真になる木を消す（道路や建物の場所） */
 export function clearTrees(group: THREE.Group, box: { minX: number; maxX: number; minZ: number; maxZ: number }, test: (x: number, z: number) => boolean): void {

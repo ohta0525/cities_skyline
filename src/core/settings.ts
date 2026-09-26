@@ -11,11 +11,17 @@ export interface Settings {
   disasters: boolean;
   /** 紛争・戦争が起こるか（false で平和モード） */
   war: boolean;
+  /** 見た目の昼夜を回す（false で昼に固定） */
+  dayNight: boolean;
+  /** 音量 0〜1 */
+  volume: number;
+  bgm: boolean;
+  ambient: boolean;
 }
 
 const KEY = 'mizuho-city/settings';
 
-export const DEFAULT_SETTINGS: Settings = { yearMinutes: 15, quality: 'high', miniature: 0.6, helpSeen: false, disasters: true, war: true };
+export const DEFAULT_SETTINGS: Settings = { yearMinutes: 15, quality: 'high', miniature: 0.6, helpSeen: false, disasters: true, war: true, dayNight: true, volume: 0.6, bgm: true, ambient: true };
 
 export function loadSettings(): Settings {
   try {
@@ -29,6 +35,10 @@ export function loadSettings(): Settings {
       helpSeen: o.helpSeen === true,
       disasters: o.disasters !== false,
       war: o.war !== false,
+      dayNight: o.dayNight !== false,
+      volume: typeof o.volume === 'number' ? Math.min(1, Math.max(0, o.volume)) : DEFAULT_SETTINGS.volume,
+      bgm: o.bgm !== false,
+      ambient: o.ambient !== false,
     };
   } catch {
     return { ...DEFAULT_SETTINGS };

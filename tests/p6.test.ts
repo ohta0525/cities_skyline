@@ -141,7 +141,7 @@ describe('P6：外交', () => {
   it('隣町の要求に答えると関係と緊張が変わる', () => {
     const { city } = town();
     const west = city.neighbor('west')!;
-    city.diplomacy.demands.push({ edge: 'west', kind: 'border', text: 'test', expires: city.day + 60 });
+    city.diplomacy.demands = [{ edge: 'west', kind: 'border', text: 'test', expires: city.day + 60 }];
     const t0 = west.tension;
     city.answerDemand('west', false);
     expect(west.tension).toBeGreaterThan(t0);

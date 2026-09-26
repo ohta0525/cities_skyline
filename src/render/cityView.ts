@@ -4,7 +4,7 @@ import type { City } from '../city/city';
 import { bbox, closestOnCurve } from '../city/geometry';
 import { halfWidth, sampleProfile } from '../city/roads';
 import { buildBuildingGeometry, buildingMaterial } from './buildingMesh';
-import { DistrictOverlay, ZoneOverlay } from './overlays';
+import { DistrictOverlay, OVERLAY_MATS, ZoneOverlay } from './overlays';
 import { buildRoadGhost, buildRoadMesh, roadMaterial } from './roadMesh';
 import { buildFacilityGeometry, buildRubbleGeometry } from './facilityMesh';
 import { FireFx, iconTexture } from './effects';
@@ -13,6 +13,8 @@ import { FACILITIES, type FacilityCategory } from '../city/facilities';
 import { Vehicles, buildTransitStatic, pathY } from './transitView';
 import { Rain, buildDefenses, buildFloodWater } from './waterView';
 import { WarView } from './warView';
+import { Crowd, Fireworks, Snowfall, StreetLights } from './seasonFx';
+import { ENV } from './env';
 
 export type Pickable = { kind: 'building' | 'facility'; id: number };
 import type { World3D } from './world3d';
@@ -62,6 +64,12 @@ export class CityView {
   private seenTerritory = -1;
   readonly rain = new Rain();
   readonly war = new WarView();
+  readonly lights = new StreetLights();
+  readonly snow = new Snowfall();
+  readonly fireworks = new Fireworks();
+  readonly crowd = new Crowd();
+  /** 花火を上げる（夏祭りの夜） */
+  fireworksOn = false;
   /** 0〜1。嵐のときの空の暗さ */
   weather = 0;
   private infoSeen = '';
@@ -76,7 +84,7 @@ export class CityView {
     this.group.add(this.buildingGroup, this.facilityGroup, this.rubbleGroup, this.fire.group, this.icons, this.rings, this.zones.zoned, this.zones.grid, this.districts.mesh, this.highlightMesh);
     this.icons.renderOrder = 20;
     this.vehicles = new Vehicles(this.buildingMat);
-    this.group.add(this.transitStatic, this.vehicles.group, this.overlay, this.rain.lines, this.war.group);
+    this.group.add(this.transitStatic, this.vehicles.group, this.overlay, this.rain.lines, this.war.group, this.lights.points, this.snow.points, this.fireworks.group, this.crowd.group);
     this.highlightMesh.renderOrder = 11;
     this.highlightMesh.visible = false;
     world.scene.add(this.group);
@@ -137,8 +145,17 @@ export class CityView {
       this.vehicles.syncTransit(c);
       this.seenTransit = tKey;
     }
-    // 紛争と市の境界
+    // 紛争と市の境界、街灯、季節、人だかり
     this.war.sync(c);
+    this.lights.sync(c, this.world.terrainEpoch);
+    this.crowd.sync(c);
+    const look = c.seasonLook();
+    // 季節はゆっくり移る。読み込み直後など大きく飛んだときは、すぐに合わせる
+    const ease = (u: { value: number }, v: number) => { u.value = Math.abs(v - u.value) > 0.3 ? v : u.value + (v - u.value) * 0.08; };
+    ease(ENV.uSnow, look.snow);
+    ease(ENV.uBlossom, look.blossom);
+    ease(ENV.uAutumn, look.autumn);
+    ease(ENV.uSummer, look.summer);
     if (v.territory !== this.seenTerritory) {
       this.seenTerritory = v.territory;
       const other = (e: 'west' | 'east' | 'north') => !c.region.neighbors.find((n) => n.edge === e)?.merged;
@@ -227,6 +244,15 @@ export class CityView {
     this.vehicles.update(dt);
     this.rain.update(Math.min(0.1, dt || 0.016), this.world.controls.target, this.weather);
     this.war.update(time, Math.min(0.1, dt));
+    const t = this.world.controls.target;
+    this.lights.update(ENV.uNight.value);
+    for (const m of OVERLAY_MATS) m.color.setScalar(1 - 0.72 * ENV.uNight.value);
+    this.crowd.update(time);
+    this.fireworks.update(Math.min(0.1, dt || 0.016), this.fireworksOn && ENV.uNight.value > 0.5, this.city.terrain, t);
+    const c = this.city;
+    const look = c.seasonLook();
+    const falling = c.day < c.society.snowUntil ? 1 : look.snow > 0.75 ? 0.3 : 0;
+    this.snow.update(Math.min(0.1, dt || 0.016), t, falling, time);
   }
 
   private place(m: THREE.Mesh, o: { ax: number; az: number; nx: number; nz: number; x: number; y: number; z: number }): void {
