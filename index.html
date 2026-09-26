@@ -3,532 +3,104 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>ミニシティ</title>
+<title>瑞穂の街</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=M+PLUS+1p:wght@400;700;800&family=Chakra+Petch:wght@500;700&display=swap">
-<style>
-  :root {
-    color-scheme: dark;
-    --panel: #17222b;
-    --panel-2: #213039;
-    --line: #34464f;
-    --ink: #e8efe9;
-    --muted: #93a6a9;
-    --accent: #f2b134;
-    --res: #6cc25a;
-    --com: #4aa3e0;
-    --ind: #e0bf3e;
-    --bad: #e2604c;
-    --ui: "M PLUS 1p", "Hiragino Sans", "Yu Gothic", system-ui, sans-serif;
-    --num: "Chakra Petch", ui-monospace, "SF Mono", Menlo, monospace;
-  }
-  html, body { height: 100%; }
-  body {
-    margin: 0; background: var(--panel); color: var(--ink);
-    font-family: var(--ui); font-size: 14px;
-    display: flex; flex-direction: column; overflow: hidden;
-    -webkit-user-select: none; user-select: none;
-  }
-  button { font: inherit; color: inherit; }
-  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-
-  .hud {
-    display: flex; flex-wrap: wrap; align-items: center; gap: 8px 20px;
-    padding: 8px 16px; background: var(--panel); border-bottom: 1px solid var(--line);
-  }
-  .brand { font-weight: 800; font-size: 16px; letter-spacing: .02em; }
-  .brand small { color: var(--muted); font-weight: 400; font-size: 12px; margin-left: 6px; }
-  .stats { display: flex; flex-wrap: wrap; gap: 4px 18px; }
-  .stat { display: flex; flex-direction: column; line-height: 1.15; }
-  .stat .k { font-size: 10px; color: var(--muted); letter-spacing: .08em; }
-  .stat .v { font-family: var(--num); font-weight: 700; font-size: 17px; font-variant-numeric: tabular-nums; }
-  .v.neg { color: var(--bad); }
-  .v.pos { color: var(--res); }
-
-  .demand { display: flex; align-items: flex-end; gap: 5px; height: 30px; padding: 0 4px 12px; }
-  .demand .bar { width: 12px; height: 100%; position: relative; background: var(--panel-2); border-radius: 2px; }
-  .demand .bar i { position: absolute; left: 0; right: 0; bottom: 50%; border-radius: 2px; }
-  .demand .bar b { position: absolute; bottom: -13px; left: 0; right: 0; text-align: center; font-size: 9px; color: var(--muted); font-family: var(--num); }
-  .demand .bar::after { content: ""; position: absolute; left: -2px; right: -2px; top: 50%; height: 1px; background: var(--line); }
-
-  .speed { display: flex; gap: 4px; margin-left: auto; }
-  .speed button, .sys button {
-    background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px;
-    padding: 4px 10px; cursor: pointer; font-family: var(--num); font-weight: 700;
-  }
-  .speed button[aria-pressed="true"] { background: var(--accent); color: #1b1606; border-color: var(--accent); }
-  .sys { display: flex; gap: 4px; }
-  .sys button { font-family: var(--ui); font-weight: 400; font-size: 12px; }
-  .sys button.warn { background: var(--bad); border-color: var(--bad); }
-
-  .stage { position: relative; flex: 1; min-height: 0; background: #2c3d2a; }
-  canvas { display: block; width: 100%; height: 100%; touch-action: none; }
-  .toast {
-    position: absolute; left: 50%; top: 12px; transform: translateX(-50%);
-    background: rgba(23, 34, 43, .94); border: 1px solid var(--line); border-radius: 8px;
-    padding: 6px 14px; font-size: 13px; pointer-events: none; transition: opacity .25s;
-  }
-  .zoom { position: absolute; right: 12px; bottom: 12px; display: flex; flex-direction: column; gap: 4px; }
-  .zoom button {
-    width: 34px; height: 34px; border-radius: 8px; border: 1px solid var(--line);
-    background: rgba(23, 34, 43, .9); font-size: 18px; cursor: pointer;
-  }
-
-  .tools {
-    display: flex; gap: 6px; padding: 8px 16px calc(8px + env(safe-area-inset-bottom, 0px));
-    background: var(--panel); border-top: 1px solid var(--line); overflow-x: auto;
-  }
-  .tool {
-    flex: 0 0 auto; display: flex; flex-direction: column; align-items: center; gap: 2px;
-    min-width: 64px; padding: 6px 8px; border-radius: 8px; cursor: pointer;
-    background: var(--panel-2); border: 1px solid var(--line);
-  }
-  .tool .sw { width: 22px; height: 6px; border-radius: 3px; }
-  .tool .n { font-weight: 700; font-size: 13px; }
-  .tool .c { font-family: var(--num); font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
-  .tool[aria-pressed="true"] { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); background: #2b3a2a; }
-  .help { color: var(--muted); font-size: 11px; align-self: center; margin-left: 8px; white-space: nowrap; }
-  @media (max-width: 640px) { .help { display: none; } .brand small { display: none; } }
-  @media (prefers-reduced-motion: reduce) { .toast { transition: none; } }
-</style>
 </head>
 <body>
-<header class="hud">
-  <div class="brand">ミニシティ<small>v0.1</small></div>
-  <div class="stats">
-    <div class="stat"><span class="k">日付</span><span class="v" id="date">1年 1月 1日</span></div>
-    <div class="stat"><span class="k">人口</span><span class="v" id="pop">0</span></div>
-    <div class="stat"><span class="k">資金</span><span class="v" id="money">¥0</span></div>
-    <div class="stat"><span class="k">月の収支</span><span class="v" id="net">¥0</span></div>
-    <div class="stat"><span class="k">雇用</span><span class="v" id="jobs">0</span></div>
-  </div>
-  <div class="demand" title="需要（住宅・商業・工業）">
-    <div class="bar"><i id="dR" style="background:var(--res)"></i><b>R</b></div>
-    <div class="bar"><i id="dC" style="background:var(--com)"></i><b>C</b></div>
-    <div class="bar"><i id="dI" style="background:var(--ind)"></i><b>I</b></div>
-  </div>
-  <div class="speed" role="group" aria-label="速度">
-    <button id="sp0" data-speed="0" aria-pressed="false">II</button>
-    <button id="sp1" data-speed="1" aria-pressed="true">▶</button>
-    <button id="sp3" data-speed="3" aria-pressed="false">▶▶</button>
-  </div>
-  <div class="sys"><button id="reset">新しい街</button></div>
-</header>
+<div id="app">
+  <canvas id="view" aria-label="街の 3D 表示"></canvas>
 
-<main class="stage" id="stage">
-  <canvas id="cv"></canvas>
-  <div class="toast" id="toast" style="opacity:0"></div>
-  <div class="zoom">
-    <button id="zin" aria-label="拡大">+</button>
-    <button id="zout" aria-label="縮小">−</button>
-  </div>
-</main>
+  <header class="topbar">
+    <div class="city">
+      <span class="country">瑞穂連邦</span>
+      <input id="cityName" class="city-name" maxlength="16" spellcheck="false" aria-label="市の名前" value="新市">
+    </div>
+    <div class="clock">
+      <span id="season" class="season">春</span>
+      <span id="date" class="date">復興暦 1年 4月 1日</span>
+    </div>
+    <div class="speed" role="group" aria-label="速度">
+      <button id="sp0" data-speed="0" title="一時停止（Space）">❚❚</button>
+      <button id="sp1" data-speed="1" title="標準">▶</button>
+      <button id="sp2" data-speed="2" title="2 倍">▶▶</button>
+      <button id="sp4" data-speed="4" title="4 倍">▶▶▶</button>
+    </div>
+    <div class="actions">
+      <button id="btnSave">保存</button>
+      <button id="btnLoad">読み込む</button>
+      <button id="btnSettings" aria-expanded="false" aria-controls="settings">設定</button>
+      <button id="btnHelp" aria-expanded="false" aria-controls="help" title="操作方法">?</button>
+    </div>
+  </header>
 
-<nav class="tools" id="tools" aria-label="ツール"></nav>
+  <aside id="settings" class="panel settings" hidden>
+    <h2>設定</h2>
+    <fieldset>
+      <legend>1 年の長さ（標準速度）</legend>
+      <div class="seg" role="radiogroup">
+        <label><input type="radio" name="yearMinutes" id="ym5" value="5"><span>5 分</span></label>
+        <label><input type="radio" name="yearMinutes" id="ym15" value="15"><span>15 分</span></label>
+        <label><input type="radio" name="yearMinutes" id="ym30" value="30"><span>30 分</span></label>
+      </div>
+      <p class="note" id="ymNote">100 年で約 25 時間</p>
+    </fieldset>
+    <fieldset>
+      <legend>画質</legend>
+      <div class="seg" role="radiogroup">
+        <label><input type="radio" name="quality" id="qHigh" value="high"><span>高</span></label>
+        <label><input type="radio" name="quality" id="qMedium" value="medium"><span>中</span></label>
+        <label><input type="radio" name="quality" id="qLow" value="low"><span>低</span></label>
+      </div>
+    </fieldset>
+    <fieldset>
+      <legend><label for="miniature">ミニチュア効果（周辺のぼかし）</label></legend>
+      <input type="range" id="miniature" min="0" max="1" step="0.05">
+    </fieldset>
+    <fieldset>
+      <legend>セーブデータ</legend>
+      <div class="row">
+        <button id="btnExport">ファイルに書き出す</button>
+        <label class="filebtn">ファイルから読み込む<input type="file" id="fileImport" accept="application/json,.json"></label>
+      </div>
+    </fieldset>
+    <fieldset>
+      <legend>新しい街</legend>
+      <p class="note">新しい地形を生成して、1 年目からやり直します。今の街は保存しない限り消えます。</p>
+      <button id="btnNew" class="danger">新しい街を始める</button>
+    </fieldset>
+  </aside>
 
-<script>
-(() => {
-  // ---------- 設定 ----------
-  const W = 64, H = 44;
-  const EMPTY = 0, ROAD = 1, RES = 2, COM = 3, IND = 4, PARK = 5;
-  const TOOLS = [
-    { id: 'road', name: '道路', cost: 10, color: '#5b6068', mode: 'line' },
-    { id: RES, name: '住宅', cost: 5, color: '#6cc25a', mode: 'rect' },
-    { id: COM, name: '商業', cost: 5, color: '#4aa3e0', mode: 'rect' },
-    { id: IND, name: '工業', cost: 5, color: '#e0bf3e', mode: 'rect' },
-    { id: 'park', name: '公園', cost: 80, color: '#2f7d3a', mode: 'rect' },
-    { id: 'bull', name: '撤去', cost: 2, color: '#e2604c', mode: 'rect' },
-    { id: 'pan', name: '移動', cost: 0, color: '#93a6a9', mode: 'pan' },
-  ];
-  const CAP = { [RES]: [0, 4, 12, 30], [COM]: [0, 3, 8, 20], [IND]: [0, 6, 14, 28] };
-  const ZCOL = { [RES]: ['#6cc25a', '#8fd67e', '#5aa84a'], [COM]: ['#4aa3e0', '#7cc0ee', '#3a86bd'], [IND]: ['#e0bf3e', '#efd46c', '#b99b2a'] };
-  const MONTH = 30;
-  const SAVE_KEY = 'minicity-save-v1';
+  <aside id="help" class="panel help" hidden>
+    <h2>操作方法</h2>
+    <dl>
+      <dt>W A S D ／ 矢印</dt><dd>移動（Shift で速く）</dd>
+      <dt>右ドラッグ</dt><dd>回転と傾き</dd>
+      <dt>中ボタンドラッグ</dt><dd>地面をつかんで移動</dd>
+      <dt>ホイール</dt><dd>ズーム（カーソルの方へ寄る）</dd>
+      <dt>Q ／ E</dt><dd>回転</dd>
+      <dt>R ／ F</dt><dd>傾き</dd>
+      <dt>Home</dt><dd>初期位置に戻る</dd>
+      <dt>Space</dt><dd>一時停止 ／ 再開</dd>
+      <dt>1 ／ 2 ／ 3</dt><dd>速度（標準 ／ 2 倍 ／ 4 倍）</dd>
+    </dl>
+    <p class="note">P0 は地形と見た目の基盤です。道路と区画は P1 で追加します。</p>
+  </aside>
 
-  // ---------- 状態 ----------
-  let S;
-  function newCity() {
-    const tiles = [];
-    for (let i = 0; i < W * H; i++) tiles.push({ t: EMPTY, lv: 0, v: Math.random() });
-    S = { tiles, money: 20000, day: 0, pop: 0, cj: 0, ij: 0, dem: { R: 50, C: 10, I: 20 }, lastNet: 0 };
-    // 最初から少しだけ街の種をまく
-    const cx = 30, cy = 22;
-    for (let x = cx - 10; x <= cx + 10; x++) set(x, cy, ROAD);
-    for (let y = cy - 7; y <= cy + 7; y++) set(cx, y, ROAD);
-    for (let x = cx - 9; x <= cx - 1; x++) for (let y = cy - 2; y <= cy - 1; y++) set(x, y, RES);
-    for (let x = cx + 1; x <= cx + 6; x++) for (let y = cy - 2; y <= cy - 1; y++) set(x, y, COM);
-    for (let x = cx + 1; x <= cx + 8; x++) for (let y = cy + 1; y <= cy + 2; y++) set(x, y, IND);
-  }
-  function tile(x, y) { return (x < 0 || y < 0 || x >= W || y >= H) ? null : S.tiles[y * W + x]; }
-  function set(x, y, t) { const k = tile(x, y); if (k) { k.t = t; k.lv = 0; } }
-  function nearRoad(x, y) {
-    for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
-      if (Math.abs(dx) + Math.abs(dy) > 2) continue;
-      const k = tile(x + dx, y + dy); if (k && k.t === ROAD) return true;
-    }
-    return false;
-  }
-  function countNear(x, y, r, pred) {
-    let n = 0;
-    for (let dy = -r; dy <= r; dy++) for (let dx = -r; dx <= r; dx++) {
-      const k = tile(x + dx, y + dy); if (k && pred(k)) n++;
-    }
-    return n;
-  }
+  <footer class="statusbar">
+    <div class="probe" id="probe">地形にカーソルを合わせると、標高と地形が表示されます</div>
+    <div class="compass" title="北">
+      <svg viewBox="0 0 40 40" width="40" height="40" aria-hidden="true">
+        <circle cx="20" cy="20" r="18" class="ring"/>
+        <g id="needle"><path d="M20 5 L25 20 L20 17 L15 20 Z" class="n"/><path d="M20 35 L25 20 L20 23 L15 20 Z" class="s"/></g>
+      </svg>
+      <span>北</span>
+    </div>
+  </footer>
 
-  // ---------- シミュレーション ----------
-  function recount() {
-    let pop = 0, cj = 0, ij = 0;
-    for (const k of S.tiles) {
-      if (k.t === RES) pop += CAP[RES][k.lv];
-      else if (k.t === COM) cj += CAP[COM][k.lv];
-      else if (k.t === IND) ij += CAP[IND][k.lv];
-    }
-    S.pop = pop; S.cj = cj; S.ij = ij;
-    const clamp = v => Math.max(-100, Math.min(100, v));
-    const workers = pop * 0.5;
-    S.dem.R = clamp(50 + (cj + ij - workers) * 1.5);
-    S.dem.C = clamp(10 + (pop * 0.25 - cj) * 2);
-    S.dem.I = clamp(20 + (pop * 0.35 - ij) * 2);
-  }
-  function monthlyNet() {
-    let roads = 0, parks = 0;
-    for (const k of S.tiles) { if (k.t === ROAD) roads++; else if (k.t === PARK) parks++; }
-    const income = S.pop * 1.5 + (S.cj + S.ij) * 2;
-    const cost = roads * 0.6 + parks * 4;
-    return Math.round(income - cost);
-  }
-  function step() {
-    S.day++;
-    const dm = { [RES]: S.dem.R, [COM]: S.dem.C, [IND]: S.dem.I };
-    for (let i = 0; i < S.tiles.length; i++) {
-      const k = S.tiles[i];
-      if (k.t < RES || k.t > IND) continue;
-      const x = i % W, y = (i / W) | 0;
-      if (!nearRoad(x, y)) { if (k.lv > 0 && Math.random() < 0.02) k.lv--; continue; }
-      const d = dm[k.t];
-      let chance = d / 100 * 0.05;
-      if (k.t !== IND) {
-        chance *= 1 + countNear(x, y, 3, t => t.t === PARK) * 0.4;
-        if (k.t === RES) chance *= 1 / (1 + countNear(x, y, 3, t => t.t === IND) * 0.25);
-      }
-      if (d > 0 && k.lv < 3 && Math.random() < chance) { k.lv++; k.v = Math.random(); }
-      else if (d < -40 && k.lv > 0 && Math.random() < 0.005) k.lv--;
-    }
-    recount();
-    if (S.day % MONTH === 0) {
-      S.lastNet = monthlyNet();
-      S.money += S.lastNet;
-      save();
-    }
-    updateHud();
-  }
-
-  // ---------- 保存 ----------
-  function save() { try { localStorage.setItem(SAVE_KEY, JSON.stringify(S)); } catch (e) {} }
-  function load() {
-    try {
-      const raw = localStorage.getItem(SAVE_KEY);
-      if (!raw) return false;
-      const d = JSON.parse(raw);
-      if (!d || !Array.isArray(d.tiles) || d.tiles.length !== W * H) return false;
-      S = d; return true;
-    } catch (e) { return false; }
-  }
-
-  // ---------- 描画 ----------
-  const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
-  const cam = { x: 0, y: 0, z: 22 };
-  let dpr = 1, vw = 0, vh = 0;
-  function resize() {
-    const r = cv.getBoundingClientRect();
-    dpr = window.devicePixelRatio || 1; vw = r.width; vh = r.height;
-    cv.width = Math.round(vw * dpr); cv.height = Math.round(vh * dpr);
-  }
-  function centerCam() {
-    cam.z = Math.max(12, Math.min(28, Math.min(vw / 40, vh / 28)));
-    cam.x = 30.5 * cam.z - vw / 2; cam.y = 22.5 * cam.z - vh / 2;
-  }
-  function toTile(px, py) { return { x: Math.floor((px + cam.x) / cam.z), y: Math.floor((py + cam.y) / cam.z) }; }
-
-  function draw() {
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.fillStyle = '#243322'; ctx.fillRect(0, 0, vw, vh);
-    const z = cam.z;
-    const x0 = Math.max(0, Math.floor(cam.x / z)), y0 = Math.max(0, Math.floor(cam.y / z));
-    const x1 = Math.min(W - 1, Math.ceil((cam.x + vw) / z)), y1 = Math.min(H - 1, Math.ceil((cam.y + vh) / z));
-    for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) {
-      const k = S.tiles[y * W + x];
-      const sx = x * z - cam.x, sy = y * z - cam.y;
-      // 地面
-      const g = 104 + ((k.v * 6) | 0);
-      ctx.fillStyle = `rgb(${g - 10},${g + 50},${g - 40})`;
-      ctx.fillRect(sx, sy, z + 0.5, z + 0.5);
-      if (k.t === ROAD) drawRoad(x, y, sx, sy, z);
-      else if (k.t === PARK) drawPark(k, sx, sy, z);
-      else if (k.t >= RES) drawZone(k, x, y, sx, sy, z);
-    }
-    // 格子線（拡大時のみ）
-    if (z >= 18) {
-      ctx.strokeStyle = 'rgba(0,0,0,.07)'; ctx.lineWidth = 1; ctx.beginPath();
-      for (let x = x0; x <= x1 + 1; x++) { const sx = Math.round(x * z - cam.x) + .5; ctx.moveTo(sx, y0 * z - cam.y); ctx.lineTo(sx, (y1 + 1) * z - cam.y); }
-      for (let y = y0; y <= y1 + 1; y++) { const sy = Math.round(y * z - cam.y) + .5; ctx.moveTo(x0 * z - cam.x, sy); ctx.lineTo((x1 + 1) * z - cam.x, sy); }
-      ctx.stroke();
-    }
-    // 地図の外枠
-    ctx.strokeStyle = 'rgba(0,0,0,.5)'; ctx.lineWidth = 2;
-    ctx.strokeRect(-cam.x, -cam.y, W * z, H * z);
-    drawPreview();
-  }
-  function drawRoad(x, y, sx, sy, z) {
-    ctx.fillStyle = '#4a4f57'; ctx.fillRect(sx, sy, z + 0.5, z + 0.5);
-    const c = z / 2, lw = Math.max(1, z * 0.06);
-    ctx.strokeStyle = '#d9d2a8'; ctx.lineWidth = lw; ctx.setLineDash([z * 0.18, z * 0.14]);
-    ctx.beginPath();
-    const n = [[0, -1], [1, 0], [0, 1], [-1, 0]];
-    let links = 0;
-    for (const [dx, dy] of n) {
-      const k = tile(x + dx, y + dy);
-      if (k && k.t === ROAD) { links++; ctx.moveTo(sx + c, sy + c); ctx.lineTo(sx + c + dx * c, sy + c + dy * c); }
-    }
-    ctx.stroke(); ctx.setLineDash([]);
-    if (links === 0) { ctx.fillStyle = '#d9d2a8'; ctx.fillRect(sx + c - lw, sy + c - lw, lw * 2, lw * 2); }
-  }
-  function drawPark(k, sx, sy, z) {
-    ctx.fillStyle = '#3f8f45'; ctx.fillRect(sx, sy, z + 0.5, z + 0.5);
-    ctx.fillStyle = '#2a6b31';
-    const r = z * 0.22;
-    ctx.beginPath(); ctx.arc(sx + z * (0.3 + k.v * 0.1), sy + z * 0.35, r, 0, 7); ctx.fill();
-    ctx.beginPath(); ctx.arc(sx + z * 0.68, sy + z * (0.62 + k.v * 0.1), r * 0.9, 0, 7); ctx.fill();
-  }
-  function drawZone(k, x, y, sx, sy, z) {
-    const [base, light, dark] = ZCOL[k.t];
-    if (k.lv === 0) {
-      ctx.fillStyle = base + '33'; ctx.fillRect(sx, sy, z + 0.5, z + 0.5);
-      ctx.strokeStyle = base + 'aa'; ctx.lineWidth = 1;
-      ctx.strokeRect(sx + 2.5, sy + 2.5, z - 5, z - 5);
-      if (!nearRoad(x, y) && z >= 14) {
-        ctx.fillStyle = '#e2604c'; ctx.font = `700 ${z * 0.5}px sans-serif`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-        ctx.fillText('!', sx + z / 2, sy + z / 2 + 1);
-      }
-      return;
-    }
-    const pad = z * (0.28 - k.lv * 0.06);
-    const h = z * 0.08 * k.lv; // 影で高さを表現
-    const bx = sx + pad, by = sy + pad, bw = z - pad * 2;
-    ctx.fillStyle = 'rgba(0,0,0,.28)'; ctx.fillRect(bx + h, by + h, bw, bw);
-    ctx.fillStyle = dark; ctx.fillRect(bx, by, bw, bw);
-    ctx.fillStyle = k.v > 0.5 ? light : base; ctx.fillRect(bx + 1, by + 1, bw - 2, bw - 2);
-    if (k.lv >= 2 && z >= 14) {
-      ctx.fillStyle = 'rgba(255,255,255,.35)';
-      const s = bw * 0.18;
-      ctx.fillRect(bx + bw * 0.2, by + bw * 0.2, s, s);
-      ctx.fillRect(bx + bw * 0.6, by + bw * 0.6, s, s);
-    }
-  }
-
-  // ---------- 入力 ----------
-  let tool = TOOLS[0], drag = null, hover = null;
-  function areaTiles(a, b) {
-    const out = [];
-    if (tool.mode === 'line') {
-      const horiz = Math.abs(b.x - a.x) >= Math.abs(b.y - a.y);
-      const len = horiz ? b.x - a.x : b.y - a.y, s = Math.sign(len) || 1;
-      for (let i = 0; i <= Math.abs(len); i++) out.push(horiz ? { x: a.x + i * s, y: a.y } : { x: a.x, y: a.y + i * s });
-    } else {
-      for (let y = Math.min(a.y, b.y); y <= Math.max(a.y, b.y); y++)
-        for (let x = Math.min(a.x, b.x); x <= Math.max(a.x, b.x); x++) out.push({ x, y });
-    }
-    return out.filter(p => tile(p.x, p.y));
-  }
-  function applies(k) {
-    if (tool.id === 'road') return k.t !== ROAD;
-    if (tool.id === 'park') return k.t !== PARK;
-    if (tool.id === 'bull') return k.t !== EMPTY;
-    return k.t === EMPTY || (k.t >= RES && k.t <= IND && k.t !== tool.id);
-  }
-  function plan(a, b) {
-    const ts = areaTiles(a, b).filter(p => applies(tile(p.x, p.y)));
-    return { ts, cost: ts.length * tool.cost };
-  }
-  function commit(a, b) {
-    const { ts, cost } = plan(a, b);
-    if (!ts.length) return;
-    if (cost > S.money) { toast(`資金が足りません（必要 ¥${cost.toLocaleString()}）`); return; }
-    for (const p of ts) {
-      const k = tile(p.x, p.y);
-      if (tool.id === 'road') set(p.x, p.y, ROAD);
-      else if (tool.id === 'park') set(p.x, p.y, PARK);
-      else if (tool.id === 'bull') set(p.x, p.y, EMPTY);
-      else set(p.x, p.y, tool.id);
-    }
-    S.money -= cost; recount(); updateHud();
-  }
-  function drawPreview() {
-    const z = cam.z;
-    if (tool.mode === 'pan') return;
-    const a = drag ? drag.start : hover, b = drag ? drag.cur : hover;
-    if (!a) return;
-    const all = areaTiles(a, b);
-    ctx.fillStyle = tool.color + '66'; ctx.strokeStyle = tool.color; ctx.lineWidth = 2;
-    for (const p of all) ctx.fillRect(p.x * z - cam.x, p.y * z - cam.y, z, z);
-    if (drag) {
-      const { cost } = plan(a, b);
-      const last = all[all.length - 1] || b;
-      const lx = (last.x + 1) * z - cam.x + 6, ly = last.y * z - cam.y - 6;
-      const label = `¥${cost.toLocaleString()}`;
-      ctx.font = '700 13px "Chakra Petch", monospace';
-      const tw = ctx.measureText(label).width;
-      ctx.fillStyle = 'rgba(23,34,43,.92)'; ctx.fillRect(lx - 4, ly - 14, tw + 8, 20);
-      ctx.fillStyle = cost > S.money ? '#e2604c' : '#f2b134'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
-      ctx.fillText(label, lx, ly - 4);
-    }
-  }
-
-  const pointers = new Map();
-  let panning = null, pinch = null;
-  function local(e) { const r = cv.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; }
-  cv.addEventListener('contextmenu', e => e.preventDefault());
-  cv.addEventListener('pointerdown', e => {
-    cv.setPointerCapture(e.pointerId);
-    const p = local(e); pointers.set(e.pointerId, p);
-    if (pointers.size === 2) { // 2本指：ピンチ＆移動
-      drag = null;
-      const [a, b] = [...pointers.values()];
-      pinch = { d: Math.hypot(a.x - b.x, a.y - b.y), z: cam.z, mx: (a.x + b.x) / 2, my: (a.y + b.y) / 2 };
-      return;
-    }
-    if (tool.mode === 'pan' || e.button === 1 || e.button === 2 || spaceDown) {
-      panning = { x: p.x, y: p.y, cx: cam.x, cy: cam.y }; return;
-    }
-    const t = toTile(p.x, p.y);
-    drag = { start: t, cur: t };
-  });
-  cv.addEventListener('pointermove', e => {
-    const p = local(e);
-    if (pointers.has(e.pointerId)) pointers.set(e.pointerId, p);
-    if (pinch && pointers.size === 2) {
-      const [a, b] = [...pointers.values()];
-      const d = Math.hypot(a.x - b.x, a.y - b.y), mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
-      zoomAt(pinch.z * d / pinch.d, mx, my);
-      cam.x -= mx - pinch.mx; cam.y -= my - pinch.my; pinch.mx = mx; pinch.my = my;
-      return;
-    }
-    if (panning) { cam.x = panning.cx - (p.x - panning.x); cam.y = panning.cy - (p.y - panning.y); return; }
-    hover = toTile(p.x, p.y);
-    if (drag) drag.cur = hover;
-  });
-  function endPointer(e) {
-    pointers.delete(e.pointerId);
-    if (pinch) { if (pointers.size < 2) pinch = null; drag = null; return; }
-    if (panning) { panning = null; return; }
-    if (drag && e.type === 'pointerup') commit(drag.start, drag.cur);
-    drag = null;
-  }
-  cv.addEventListener('pointerup', endPointer);
-  cv.addEventListener('pointercancel', endPointer);
-  cv.addEventListener('pointerleave', e => { if (e.pointerType === 'mouse' && !drag) hover = null; });
-  function zoomAt(nz, px, py) {
-    nz = Math.max(8, Math.min(48, nz));
-    const wx = (px + cam.x) / cam.z, wy = (py + cam.y) / cam.z;
-    cam.z = nz; cam.x = wx * nz - px; cam.y = wy * nz - py;
-  }
-  cv.addEventListener('wheel', e => { e.preventDefault(); const p = local(e); zoomAt(cam.z * (e.deltaY < 0 ? 1.12 : 1 / 1.12), p.x, p.y); }, { passive: false });
-  document.getElementById('zin').onclick = () => zoomAt(cam.z * 1.25, vw / 2, vh / 2);
-  document.getElementById('zout').onclick = () => zoomAt(cam.z / 1.25, vw / 2, vh / 2);
-
-  let spaceDown = false;
-  const keys = new Set();
-  window.addEventListener('keydown', e => {
-    if (e.code === 'Space') { spaceDown = true; e.preventDefault(); }
-    if (e.key >= '1' && e.key <= String(TOOLS.length)) pickTool(TOOLS[+e.key - 1]);
-    if (e.key === 'p' || e.key === 'P') setSpeed(speed === 0 ? 1 : 0);
-    keys.add(e.key);
-  });
-  window.addEventListener('keyup', e => { if (e.code === 'Space') spaceDown = false; keys.delete(e.key); });
-
-  // ---------- UI ----------
-  const toolsEl = document.getElementById('tools');
-  TOOLS.forEach((t, i) => {
-    const b = document.createElement('button');
-    b.className = 'tool'; b.id = 'tool-' + t.id; b.setAttribute('aria-pressed', i === 0);
-    b.innerHTML = `<span class="sw" style="background:${t.color}"></span><span class="n">${t.name}</span><span class="c">${t.cost ? '¥' + t.cost + '/マス' : '　'}</span>`;
-    b.title = `${t.name}（キー ${i + 1}）`;
-    b.onclick = () => pickTool(t);
-    t.el = b; toolsEl.appendChild(b);
-  });
-  const help = document.createElement('span');
-  help.className = 'help';
-  help.textContent = 'ドラッグで建設 ／ 右ドラッグ・Space+ドラッグで移動 ／ ホイールでズーム ／ 1〜7でツール切替';
-  toolsEl.appendChild(help);
-  function pickTool(t) { tool = t; TOOLS.forEach(x => x.el.setAttribute('aria-pressed', x === t)); drag = null; }
-
-  let speed = 1;
-  function setSpeed(s) { speed = s; document.querySelectorAll('.speed button').forEach(b => b.setAttribute('aria-pressed', +b.dataset.speed === s)); }
-  document.querySelectorAll('.speed button').forEach(b => b.onclick = () => setSpeed(+b.dataset.speed));
-
-  const resetBtn = document.getElementById('reset');
-  let resetArmed = null;
-  resetBtn.onclick = () => {
-    if (!resetArmed) {
-      resetBtn.textContent = 'もう一度押すとリセット'; resetBtn.classList.add('warn');
-      resetArmed = setTimeout(disarm, 3000); return;
-    }
-    disarm(); newCity(); recount(); centerCam(); save(); updateHud(); toast('新しい街を作りました');
-  };
-  function disarm() { clearTimeout(resetArmed); resetArmed = null; resetBtn.textContent = '新しい街'; resetBtn.classList.remove('warn'); }
-
-  let toastT;
-  const toastEl = document.getElementById('toast');
-  function toast(msg) { toastEl.textContent = msg; toastEl.style.opacity = 1; clearTimeout(toastT); toastT = setTimeout(() => toastEl.style.opacity = 0, 2200); }
-
-  const $ = id => document.getElementById(id);
-  function yen(n) { return (n < 0 ? '-¥' : '¥') + Math.abs(Math.round(n)).toLocaleString(); }
-  function updateHud() {
-    const y = Math.floor(S.day / 360) + 1, m = Math.floor(S.day % 360 / MONTH) + 1, d = S.day % MONTH + 1;
-    $('date').textContent = `${y}年 ${m}月 ${d}日`;
-    $('pop').textContent = S.pop.toLocaleString();
-    $('money').textContent = yen(S.money);
-    $('money').className = 'v' + (S.money < 0 ? ' neg' : '');
-    $('jobs').textContent = (S.cj + S.ij).toLocaleString();
-    const net = monthlyNet();
-    $('net').textContent = (net > 0 ? '+' : '') + yen(net);
-    $('net').className = 'v ' + (net < 0 ? 'neg' : 'pos');
-    for (const [k, id] of [['R', 'dR'], ['C', 'dC'], ['I', 'dI']]) {
-      const v = S.dem[k], el = $(id);
-      el.style.height = Math.abs(v) / 2 + '%';
-      el.style.bottom = v >= 0 ? '50%' : (50 - Math.abs(v) / 2) + '%';
-      el.style.opacity = v >= 0 ? 1 : .45;
-    }
-  }
-
-  // ---------- ループ ----------
-  let acc = 0, last = performance.now();
-  function frame(now) {
-    const dt = Math.min(250, now - last); last = now;
-    const pan = 0.6 * dt;
-    if (keys.has('ArrowLeft') || keys.has('a')) cam.x -= pan;
-    if (keys.has('ArrowRight') || keys.has('d')) cam.x += pan;
-    if (keys.has('ArrowUp') || keys.has('w')) cam.y -= pan;
-    if (keys.has('ArrowDown') || keys.has('s')) cam.y += pan;
-    if (speed > 0) {
-      acc += dt * speed;
-      while (acc >= 350) { acc -= 350; step(); }
-    }
-    draw();
-    requestAnimationFrame(frame);
-  }
-
-  function start(data) {
-    if (data && data.S) S = data.S;
-    else if (!load()) newCity();
-    resize(); centerCam(); recount(); updateHud();
-    window.addEventListener('resize', () => resize());
-    requestAnimationFrame(frame);
-  }
-  window.claude?.hot?.snapshot?.(() => ({ S }));
-  window.claude?.hot?.ready ? window.claude.hot.ready(start) : start(window.claude?.hot?.data ?? {});
-})();
-</script>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <div id="loading" class="loading">地形を生成しています…</div>
+</div>
+<script type="module" src="./src/main.ts"></script>
 </body>
 </html>
