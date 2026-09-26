@@ -8,6 +8,8 @@ export interface Settings {
   /** ミニチュア効果（周辺のぼかし）の強さ 0〜1 */
   miniature: number;
   helpSeen: boolean;
+  /** チュートリアルを終えた */
+  tutorialDone: boolean;
   disasters: boolean;
   /** 紛争・戦争が起こるか（false で平和モード） */
   war: boolean;
@@ -21,7 +23,7 @@ export interface Settings {
 
 const KEY = 'mizuho-city/settings';
 
-export const DEFAULT_SETTINGS: Settings = { yearMinutes: 15, quality: 'high', miniature: 0.6, helpSeen: false, disasters: true, war: true, dayNight: true, volume: 0.6, bgm: true, ambient: true };
+export const DEFAULT_SETTINGS: Settings = { yearMinutes: 15, quality: 'high', miniature: 0.6, helpSeen: false, tutorialDone: false, disasters: true, war: true, dayNight: true, volume: 0.6, bgm: true, ambient: true };
 
 export function loadSettings(): Settings {
   try {
@@ -33,6 +35,7 @@ export function loadSettings(): Settings {
       quality: o.quality === 'medium' || o.quality === 'low' ? o.quality : 'high',
       miniature: typeof o.miniature === 'number' ? Math.min(1, Math.max(0, o.miniature)) : DEFAULT_SETTINGS.miniature,
       helpSeen: o.helpSeen === true,
+      tutorialDone: o.tutorialDone === true,
       disasters: o.disasters !== false,
       war: o.war !== false,
       dayNight: o.dayNight !== false,

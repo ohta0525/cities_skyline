@@ -40,8 +40,9 @@
       <button id="sp4" data-speed="4" title="4 倍">▶▶▶</button>
     </div>
     <div class="actions">
-      <button id="btnSave">保存</button>
-      <button id="btnLoad">読み込む</button>
+      <button id="btnSave" title="セーブデータに保存（Ctrl+S）">保存</button>
+      <button id="btnLoad" title="セーブデータを読み込む">読み込む</button>
+      <button id="btnTitle" title="タイトル画面に戻る（自動保存します）">タイトル</button>
       <button id="btnSettings" aria-expanded="false" aria-controls="settings">設定</button>
       <button id="btnHelp" aria-expanded="false" aria-controls="help" title="操作方法">?</button>
     </div>
@@ -220,6 +221,44 @@
       <span>北</span>
     </div>
   </footer>
+
+  <section id="tutorial" class="tutorial" hidden aria-live="polite">
+    <div class="tut-head"><span class="tut-badge">チュートリアル</span><span id="tutStep"></span><button id="tutQuit" class="close" title="チュートリアルをやめる">×</button></div>
+    <div class="tut-progress"><i id="tutBar"></i></div>
+    <h3 id="tutTitle"></h3>
+    <p id="tutText"></p>
+    <p id="tutHint" class="note"></p>
+    <div class="row end"><button id="tutSkip" class="ghost">スキップ</button><button id="tutNext" class="primary">次へ</button></div>
+  </section>
+
+  <div id="saves" class="screen" hidden>
+    <div class="screen-box" role="dialog" aria-modal="true" aria-labelledby="savesTitle">
+      <div class="screen-head">
+        <h2 id="savesTitle">セーブデータ</h2>
+        <div class="tabs"><button data-mode="save">保存する</button><button data-mode="load">読み込む</button></div>
+        <button id="savesClose" class="close" title="閉じる（Esc）">×</button>
+      </div>
+      <p id="savesNote" class="note"></p>
+      <div id="savesGrid" class="slot-grid"></div>
+      <p class="note">データはこのブラウザの中に保存されます。別のパソコンに移すときは「書き出す」でファイルにし、設定の「ファイルから読み込む」で読み込んでください。</p>
+    </div>
+  </div>
+
+  <div id="title" class="title" hidden>
+    <div class="title-inner">
+      <p class="t-country">瑞穂連邦　復興暦</p>
+      <h1 class="t-logo">瑞穂の街</h1>
+      <p class="t-sub">災害の多い国土で、隣町と支え合い競いながら、100 年続く街をつくる</p>
+      <nav class="t-menu" aria-label="タイトル">
+        <button id="tContinue" class="t-primary"><b>つづきから</b><span id="tContinueInfo"></span></button>
+        <button id="tNew"><b>はじめから</b><span>キャンペーン・サンドボックス・シナリオ</span></button>
+        <button id="tTutorial"><b>チュートリアル</b><span>10 ステップで街づくりの基本を覚える</span></button>
+        <button id="tLoad"><b>セーブデータ</b><span>保存した街を読み込む</span></button>
+        <div class="t-row"><button id="tSettings">設定</button><button id="tHelp">操作方法</button></div>
+      </nav>
+      <p class="t-foot"><span id="tVersion"></span>　PC のブラウザ（Chrome／Edge／Firefox）向け</p>
+    </div>
+  </div>
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
   <div id="loading" class="loading">地形を生成しています…</div>

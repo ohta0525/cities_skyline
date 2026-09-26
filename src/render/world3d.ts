@@ -312,6 +312,25 @@ export class World3D {
     (this.scene.fog as THREE.Fog).far = 14000 - w * 11000;
   }
 
+  /** 今の画面を小さな JPEG にする（セーブデータの縮小画像） */
+  captureThumb(w = 320, h = 180): string {
+    try {
+      this.composer.render(0);
+      const src = this.renderer.domElement;
+      const c = document.createElement('canvas');
+      c.width = w; c.height = h;
+      const ctx = c.getContext('2d')!;
+      // 画面の中央を 16:9 で切り出す
+      const sw = src.width, sh = src.height;
+      const scale = Math.min(sw / w, sh / h);
+      const cw = w * scale, ch = h * scale;
+      ctx.drawImage(src, (sw - cw) / 2, (sh - ch) / 2, cw, ch, 0, 0, w, h);
+      return c.toDataURL('image/jpeg', 0.72);
+    } catch {
+      return '';
+    }
+  }
+
   /** 地震の揺れの演出 */
   shake(amplitude: number, seconds: number): void {
     this.shakeAmp = amplitude;

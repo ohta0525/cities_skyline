@@ -25,6 +25,11 @@ import type { Ending } from './city/ending';
 import { fmLine } from './city/media';
 import { decreeActive } from './city/policies';
 import { Sound } from './audio/sound';
+import { SaveScreen } from './ui/saves';
+import { Tutorial } from './ui/tutorial';
+import { migrateOldSave, type SlotMeta } from './save/slots';
+
+const VERSION = '1.1.0';
 import { ENV } from './render/env';
 import type { ElectionResult } from './city/politics';
 import * as THREE from 'three';
@@ -54,7 +59,7 @@ worker.onmessage = (e: MessageEvent<FromWorker>) => {
   updateStats();
   // 月が変わるたびに自動保存
   const month = Math.floor(sim.day / MONTH_DAYS);
-  if (lastMonth >= 0 && month !== lastMonth && city.ending?.kind !== 'coup') storeSave('auto', snapshot());
+  if (lastMonth >= 0 && month !== lastMonth && !demoCity && city.ending?.kind !== 'coup') autoSave();
   lastMonth = month;
 };
 
@@ -180,7 +185,8 @@ window.addEventListener('keydown', (e) => {
   if (e.code === 'Digit1') setSpeed(1);
   if (e.code === 'Digit2') setSpeed(2);
   if (e.code === 'Digit3') setSpeed(4);
-  if (e.code === 'Escape') closePanels();
+  if (e.code === 'Escape') { if (saves.isOpen) saves.close(); else closePanels(); }
+  if ((e.ctrlKey || e.metaKey) && e.code === 'KeyS') { e.preventDefault(); if (!atTitle) openSaves('save'); }
 });
 
 // ---------- 保存と読み込み ----------
@@ -193,14 +199,43 @@ function toast(msg: string): void {
   toastTimer = setTimeout(() => el.classList.remove('show'), 2400);
 }
 
-$('btnSave').onclick = () => {
-  toast(storeSave('manual', snapshot()) ? '保存しました' : '保存できませんでした。ブラウザの保存領域が使えない状態です');
-};
-$('btnLoad').onclick = () => {
-  const s = loadSave('manual');
-  if (!s) { toast('保存したデータがありません。先に「保存」を押してください'); return; }
-  startCity(s);
-  toast(`${formatDate(dateOf(s.sim.day))} のデータを読み込みました`);
+// ---------- セーブデータの画面 ----------
+/** 自動保存（縮小画像もいっしょに残す） */
+function autoSave(): void {
+  storeSave('auto', snapshot());
+  try { localStorage.setItem('mizuho-city/autothumb', world.captureThumb()); } catch { /* 画像がなくても遊べる */ }
+}
+function slotMeta(): Omit<SlotMeta, 'id' | 'thumb'> {
+  return {
+    cityName, savedAt: new Date().toISOString(), day: sim.day, population: city.stats.population, money: city.econ.money,
+    scenario: SCENARIOS[city.scenario.id].name.replace('シナリオ：', '').replace('（100 年）', ''),
+  };
+}
+let saveResume: Speed | null = null;
+const saves = new SaveScreen({
+  snapshot: () => (atTitle || demoCity ? null : snapshot()),
+  meta: slotMeta,
+  thumb: () => world.captureThumb(),
+  load: (data, label) => {
+    hideTitle();
+    if (tutorial.active) tutorial.stop(false);
+    startCity(data);
+    saveResume = null;
+    setSpeed(1);
+    toast(`${label}の「${data.cityName}」（${formatDate(dateOf(data.sim.day))}）を読み込みました`);
+  },
+  toast,
+  onClose: () => { if (saveResume !== null && !atTitle) setSpeed(saveResume); saveResume = null; },
+});
+function openSaves(mode: 'save' | 'load'): void {
+  if (!atTitle && saveResume === null) { saveResume = speed; setSpeed(0); }
+  void saves.open(mode);
+}
+$('btnSave').onclick = () => openSaves('save');
+$('btnLoad').onclick = () => openSaves('load');
+$('btnTitle').onclick = () => {
+  if (city.ending?.kind !== 'coup') autoSave();
+  showTitle();
 };
 $('btnExport').onclick = () => {
   const blob = new Blob([serialize(snapshot())], { type: 'application/json' });
@@ -313,8 +348,11 @@ function chooseMode(first = false): void {
     b.innerHTML = `<b>${SCENARIOS[id].name}</b><span>${SCENARIOS[id].intro}</span>`;
     b.onclick = () => {
       closeModal();
+      hideTitle();
+      if (tutorial.active) tutorial.stop(false);
       const s = freshCity();
       startCity(s, id);
+      setSpeed(1);
       storeSave('auto', snapshot());
       toast(`${SCENARIOS[id].name}を始めました`);
       if (first && !settings.helpSeen) $('btnHelp').click();
@@ -390,7 +428,7 @@ function showModal(title: string, body: (Node | string)[], buttons: { label: str
 }
 function closeModal(): void {
   $('modal').hidden = true;
-  if (modalResume !== null) { setSpeed(modalResume || 1); modalResume = null; }
+  if (modalResume !== null) { setSpeed(atTitle ? 0 : modalResume || 1); modalResume = null; }
 }
 const para = (text: string, cls = '') => Object.assign(document.createElement('p'), { textContent: text, className: cls });
 
@@ -661,6 +699,83 @@ $<HTMLInputElement>('bgmOn').onchange = (e) => { settings.bgm = (e.target as HTM
 $<HTMLInputElement>('ambOn').checked = settings.ambient;
 $<HTMLInputElement>('ambOn').onchange = (e) => { settings.ambient = (e.target as HTMLInputElement).checked; sound.ambient = settings.ambient; saveSettings(settings); };
 
+// ---------- タイトル画面 ----------
+let atTitle = false;
+/** セーブのない初回に、タイトルの背景用に作った街（保存しない） */
+let demoCity = false;
+function showTitle(): void {
+  atTitle = true;
+  if (tutorial.active) tutorial.stop(false);
+  closeModal();
+  closePanels();
+  hall.open && hall.toggle(hall.open);
+  tools.select('none');
+  setSpeed(0);
+  document.body.classList.add('at-title');
+  $('title').hidden = false;
+  const auto = demoCity ? null : loadSave('auto');
+  const cont = $<HTMLButtonElement>('tContinue');
+  cont.disabled = !auto;
+  cont.classList.toggle('t-primary', !!auto);
+  $('tContinueInfo').textContent = auto ? `${auto.cityName}・${formatDate(dateOf(auto.sim.day))}` : 'まだ街がありません';
+  $('tTutorial').classList.toggle('t-primary', !settings.tutorialDone && !auto);
+  $('tVersion').textContent = `v${VERSION}`;
+  const st = world.controls.getState();
+  world.controls.setState({ ...st, distance: Math.max(900, Math.min(1600, st.distance)), pitch: 0.5 });
+}
+function hideTitle(): void {
+  if (!atTitle) return;
+  atTitle = false;
+  demoCity = false;
+  document.body.classList.remove('at-title');
+  $('title').hidden = true;
+}
+$('tContinue').onclick = () => {
+  const auto = loadSave('auto');
+  if (!auto) return;
+  hideTitle();
+  startCity(auto);
+  setSpeed(1);
+};
+$('tNew').onclick = () => chooseMode();
+$('tLoad').onclick = () => openSaves('load');
+$('tSettings').onclick = () => $('btnSettings').click();
+$('tHelp').onclick = () => $('btnHelp').click();
+$('tTutorial').onclick = () => startTutorial();
+
+/** タイトルの背景：ゆっくり回る */
+function titleOrbit(dt: number): void {
+  if (!atTitle) return;
+  const st = world.controls.getState();
+  world.controls.setState({ ...st, yaw: st.yaw + dt * 0.035 });
+}
+
+// ---------- チュートリアル ----------
+const tutorial = new Tutorial(
+  () => ({ city, camera: world.controls.getState(), panel: hall.open, infoMode: hall.infoMode, speed, tool: tools.tool }),
+  (completed) => {
+    city.disastersEnabled = settings.disasters;
+    city.warEnabled = settings.war;
+    if (completed) {
+      settings.tutorialDone = true;
+      saveSettings(settings);
+      showModal('チュートリアル完了', [para('基本の操作はこれで終わりです。この街はそのまま育てられます（自動保存されます）。'), para('災害と紛争はチュートリアルの間だけ止めていました。いまは設定どおりに戻っています。', 'note')], [{ label: '街づくりを続ける', primary: true }]);
+    }
+  },
+);
+function startTutorial(): void {
+  hideTitle();
+  const s = freshCity();
+  startCity(s, 'campaign');
+  cityName = 'はじめ市';
+  $<HTMLInputElement>('cityName').value = cityName;
+  city.disastersEnabled = false;
+  city.warEnabled = false;
+  world.controls.setState({ ...DEFAULT_CAMERA, distance: 1400, pitch: 0.7 });
+  setSpeed(0);
+  tutorial.begin();
+}
+
 // ---------- ループ ----------
 window.addEventListener('resize', () => world.resize());
 let last = performance.now();
@@ -671,6 +786,8 @@ function frame(now: number): void {
   view.update(now / 1000, speed === 0 ? 0 : dt * Math.min(speed, 3));
   updateDayTime(dt);
   updateFm(dt);
+  titleOrbit(dt);
+  tutorial.update();
   world.setWeather(view.weather);
   hall.update();
   checkPolitics();
@@ -681,16 +798,21 @@ function frame(now: number): void {
   requestAnimationFrame(frame);
 }
 
-window.addEventListener('beforeunload', () => { if (terrain && city.ending?.kind !== 'coup') storeSave('auto', snapshot()); });
+window.addEventListener('beforeunload', () => { if (terrain && !demoCity && city.ending?.kind !== 'coup') storeSave('auto', snapshot()); });
 
 // 起動：前回の自動保存があれば続きから
 requestAnimationFrame(() => {
   const resume = loadSave('auto');
-  startCity(resume ?? freshCity());
-  setSpeed(1);
+  if (resume) startCity(resume);
+  else {
+    // 初めての人には、背景用の小さな町を見せる（保存はしない）
+    startCity(freshCity());
+    city.seedTown((q) => Math.hypot(q.x, q.z - 150) < 320 && city.ownsLand(q), [[1, 0.5], [2, 0.15], [3, 0.2], [4, 0.1], [5, 0.05]], 1_600, 25, 24);
+    demoCity = true;
+  }
   $('loading').hidden = true;
-  if (!resume) chooseMode(true);
-  else if (!settings.helpSeen) $('btnHelp').click();
+  showTitle();
+  void migrateOldSave((s) => ({ cityName: s.cityName, savedAt: s.savedAt, day: s.sim.day, population: 0, money: s.city.economy?.money ?? 0, scenario: '' }));
   requestAnimationFrame(frame);
 });
 
