@@ -3,6 +3,7 @@ import type { City } from '../city/city';
 import { dist2, type P2 } from '../city/geometry';
 import { ROAD_TYPES, type RoadPlan, type RoadType, type Snap } from '../city/roads';
 import { ZONES, type ZoneId } from '../city/zones';
+import { formatYen } from '../city/economy';
 import type { CityView } from '../render/cityView';
 import { ring } from '../render/overlays';
 import { buildRoadGhost } from '../render/roadMesh';
@@ -73,6 +74,8 @@ export class Tools {
   }
 
   select(tool: ToolId): void {
+    const blocked = tool !== 'none' && this.city.blockedReason();
+    if (blocked) { this.ui.toast(blocked); tool = 'none'; }
     this.tool = tool;
     this.start = null;
     this.control = null;
@@ -184,8 +187,13 @@ export class Tools {
     this.ghost.visible = true;
     const len = `${Math.round(plan.length)} m`;
     if (waitingControl) this.showTip(`${len}　クリックで曲がる位置を決める`);
-    else if (plan.ok) this.showTip(`${ROAD_TYPES[this.roadType].name}　${len}${plan.bridgeLength > 0 ? `（うち橋 ${Math.round(plan.bridgeLength)} m）` : ''}`);
-    else this.showTip(plan.reason ?? '置けません', true);
+    else {
+      const problem = this.city.checkRoad(plan);
+      const cost = plan.ok ? `　${formatYen(this.city.roadCost(plan))}` : '';
+      if (problem) this.showTip(`${problem}${plan.ok ? cost : ''}`, true);
+      else this.showTip(`${ROAD_TYPES[this.roadType].name}　${len}${plan.bridgeLength > 0 ? `（うち橋 ${Math.round(plan.bridgeLength)} m）` : ''}${cost}`);
+      if (problem && plan.ok) (this.ghost.material as THREE.MeshBasicMaterial).color.set('#ff5a4a');
+    }
   }
 
   /** 置けないときの見本用に、地形に沿った高さを作る */
@@ -236,7 +244,8 @@ export class Tools {
     this.refresh();
     const plan = this.plan;
     if (!plan) return;
-    if (!plan.ok) { this.ui.toast(plan.reason ?? 'ここには置けません'); return; }
+    const problem = this.city.checkRoad(plan);
+    if (problem) { this.ui.toast(problem); return; }
     this.city.buildRoad(plan);
     // 続けて引けるよう、終点を次の始点にする
     this.start = this.city.snap(plan.curve.p2, true);

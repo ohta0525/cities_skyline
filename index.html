@@ -13,17 +13,19 @@
 
   <header class="topbar">
     <div class="city">
-      <span class="country">瑞穂連邦</span>
+      <span class="country">瑞穂連邦 <span id="rank">市</span></span>
       <input id="cityName" class="city-name" maxlength="16" spellcheck="false" aria-label="市の名前" value="新市">
     </div>
     <div class="clock">
       <span id="season" class="season">春</span>
       <span id="date" class="date">復興暦 1年 4月 1日</span>
+      <span id="era" class="era">再建期</span>
     </div>
     <div class="stats">
       <div class="stat"><span class="k">人口</span><span class="v" id="pop">0</span></div>
-      <div class="stat"><span class="k">雇用</span><span class="v" id="jobs">0</span></div>
-      <div class="stat"><span class="k">建物</span><span class="v" id="bcount">0</span></div>
+      <div class="stat"><span class="k">資金</span><span class="v" id="money">0</span></div>
+      <div class="stat"><span class="k">先月の収支</span><span class="v" id="net">—</span></div>
+      <div class="stat"><span class="k">支持率</span><span class="v" id="approval">—</span></div>
       <div class="demand" title="需要（住宅・商業・工業）">
         <div class="bar"><i id="dRes" style="background:#3cb878"></i><b>住</b></div>
         <div class="bar"><i id="dCom" style="background:#e6475a"></i><b>商</b></div>
@@ -101,8 +103,29 @@
       <li>「区画」で用途地域を選び、道路沿いのマスをドラッグで塗ります</li>
       <li>需要（画面上の 住・商・工 のバー）に応じて、建物が建っていきます</li>
       <li>「地区」で町を塗り分けると、町名が付きます</li>
+      <li>左の「財政」で税率と市債、「住民」で失業や満足度、「地域」で隣町との通勤を確認できます</li>
+      <li>4 年ごとに市長選挙があります。「政治」で派閥の支持を見ながら、公約を掲げて再選を目指します</li>
     </ol>
   </aside>
+
+  <button id="ticker" class="ticker" title="新聞を開く"><b>地元紙</b><span id="tickerText"></span></button>
+
+  <nav class="rail" aria-label="市役所">
+    <button data-panel="finance" aria-pressed="false">財政</button>
+    <button data-panel="people" aria-pressed="false">住民</button>
+    <button data-panel="politics" aria-pressed="false">政治<i id="politicsBadge" class="badge" hidden></i></button>
+    <button data-panel="region" aria-pressed="false">地域</button>
+    <button data-panel="news" aria-pressed="false">新聞<i id="newsBadge" class="badge" hidden></i></button>
+  </nav>
+  <aside id="panel" class="panel cityhall" hidden></aside>
+
+  <div id="modal" class="modal" hidden>
+    <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+      <h2 id="modalTitle"></h2>
+      <div id="modalBody"></div>
+      <div id="modalButtons" class="row end"></div>
+    </div>
+  </div>
 
   <div id="labels" class="labels" aria-hidden="true"></div>
   <div id="tip" class="tip" hidden></div>

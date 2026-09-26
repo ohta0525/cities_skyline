@@ -59,6 +59,16 @@ export interface Building {
   cellPos: number[];
   residents: number;
   jobs: number;
+  /** 建った年（復興暦） */
+  built: number;
+  /** 旧耐震基準か新耐震基準か */
+  seismic: 'old' | 'new';
+}
+
+/** 建物の資産価値（万円）。固定資産税の元になる */
+export function buildingValue(b: Pick<Building, 'floors' | 'w' | 'd' | 'zone'>): number {
+  const factor = b.zone <= 2 ? 1 : b.zone <= 4 ? 1.4 : 1.1;
+  return 250 * b.floors * b.w * b.d * factor;
 }
 
 export function kindsForZone(zone: number): BuildingKind[] {

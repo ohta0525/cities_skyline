@@ -9,6 +9,11 @@ import { KINDS } from './city/buildings';
 import { zoneDef } from './city/zones';
 import { CityView } from './render/cityView';
 import { Tools } from './ui/tools';
+import { Panels } from './ui/panels';
+import { formatYen } from './city/economy';
+import { RANKS, eraOf, yearOf } from './city/eras';
+import { AI_MAYORS, FACTIONS, PLEDGES, type PledgeId } from './city/politics';
+import type { ElectionResult } from './city/politics';
 import * as THREE from 'three';
 import { MONTH_DAYS, YEAR_DAYS, dateOf, formatDate, seasonOf, type Speed, type YearMinutes } from './sim/clock';
 import type { FromWorker, SimState, ToWorker } from './sim/protocol';
@@ -46,6 +51,7 @@ const world = new World3D(canvas, settings.quality, settings.miniature);
 city = new City(generateTerrain(1), 1);
 const view = new CityView(world, city);
 const tools = new Tools(world, city, view, canvas, { toast });
+const hall = new Panels(() => city, { toast });
 
 function startCity(save: SaveData): void {
   cityName = save.cityName;
@@ -103,8 +109,18 @@ function updateClock(): void {
 function updateStats(): void {
   const st = city.stats;
   $('pop').textContent = st.population.toLocaleString();
-  $('jobs').textContent = (st.comJobs + st.indJobs).toLocaleString();
-  $('bcount').textContent = st.buildings.toLocaleString();
+  const money = $('money');
+  money.textContent = formatYen(city.econ.money);
+  money.className = `v${city.econ.money < 0 ? ' neg' : ''}`;
+  const last = city.econ.reports.at(-1);
+  const net = $('net');
+  net.textContent = last ? `${last.net >= 0 ? '+' : ''}${formatYen(last.net)}` : '—';
+  net.className = `v ${last && last.net < 0 ? 'neg' : 'pos'}`;
+  const ap = $('approval');
+  ap.textContent = `${city.politics.approval.toFixed(0)}％`;
+  ap.className = `v ${city.politics.approval < 50 ? 'neg' : ''}`;
+  $('rank').textContent = RANKS[city.meta.rank].name;
+  $('era').textContent = eraOf(yearOf(sim.day)).name;
   for (const [id, v] of [['dRes', st.demand.res], ['dCom', st.demand.com], ['dInd', st.demand.ind]] as const) {
     const el = $(id);
     el.style.height = `${Math.abs(v) / 2}%`;
@@ -278,6 +294,66 @@ function updateProbe(dt: number): void {
   el.innerHTML = `${label}<span class="kind">${kind}</span>${district ? `<span class="kind">${district}</span>` : ''}`;
 }
 
+// ---------- お知らせのダイアログ（選挙など） ----------
+let modalResume: Speed | null = null;
+function showModal(title: string, body: (Node | string)[], buttons: { label: string; primary?: boolean; onClick?: () => void }[]): void {
+  if (modalResume === null) modalResume = speed;
+  setSpeed(0);
+  $('modalTitle').textContent = title;
+  $('modalBody').replaceChildren(...body);
+  $('modalButtons').replaceChildren(...buttons.map((b) => {
+    const el = document.createElement('button');
+    el.textContent = b.label;
+    if (b.primary) el.className = 'primary';
+    el.onclick = () => { closeModal(); b.onClick?.(); };
+    return el;
+  }));
+  $('modal').hidden = false;
+  ($('modalButtons').lastElementChild as HTMLElement | null)?.focus();
+}
+function closeModal(): void {
+  $('modal').hidden = true;
+  if (modalResume !== null) { setSpeed(modalResume || 1); modalResume = null; }
+}
+const para = (text: string, cls = '') => Object.assign(document.createElement('p'), { textContent: text, className: cls });
+
+let pledgeShown = false;
+function checkPolitics(): void {
+  const ev = city.events.shift();
+  if (ev?.type === 'election') showElection(ev.result);
+  const p = city.politics;
+  if (p.pledgeChoiceOpen && !pledgeShown && $('modal').hidden) {
+    pledgeShown = true;
+    const who = p.mayor === 'player'
+      ? (p.challenger ? `対立候補：${AI_MAYORS[p.challenger].name}（${AI_MAYORS[p.challenger].title}）` : '')
+      : `現職：${AI_MAYORS[p.mayor].name}（${AI_MAYORS[p.mayor].title}）`;
+    const choices = (Object.keys(PLEDGES) as PledgeId[]).map((id) => {
+      const pl = PLEDGES[id];
+      const b = document.createElement('button');
+      b.className = 'pledge';
+      b.innerHTML = `<b>${pl.name}</b>${pl.promise}<br><span class="note">支持が上がる派閥：${pl.boost.map((f) => FACTIONS.find((x) => x.id === f)!.name).join('・')}</span>`;
+      b.onclick = () => { city.choosePledge(id); closeModal(); toast(`公約「${pl.name}」を掲げました`); };
+      return b;
+    });
+    showModal('市長選挙まであと 3 か月', [para(`4 月に市長選挙があります。${who}`), para('公約を 1 つ選んでください。守れば次の選挙で評価され、破れば批判されます。', 'note'), ...choices],
+      [{ label: 'あとで決める（政治パネルからも選べます）' }]);
+  }
+  if (!p.pledgeChoiceOpen) pledgeShown = false;
+}
+
+function showElection(r: ElectionResult): void {
+  const rows = FACTIONS.map((f) => `<tr><td>${f.name}</td><td>${r.byFaction[f.id].toFixed(0)}％</td></tr>`).join('');
+  const table = document.createElement('table');
+  table.className = 'ledger';
+  table.innerHTML = `<tr><th>派閥</th><th>あなたへの投票</th></tr>${rows}`;
+  const res = para(`${r.player.toFixed(1)}％ 対 ${r.opponent.toFixed(1)}％`, 'result');
+  const msg = r.won
+    ? (city.politics.elections.length > 1 && city.politics.elections.at(-2)!.won === false ? '返り咲きました。ふたたび市長として街をつくれます。' : '再選されました。次の 4 年も市長です。')
+    : `落選しました。${r.opponentName}が市長になります。4 年間は街を直接つくれません。政治パネルから野党として活動し、次の選挙で返り咲きを狙ってください。`;
+  showModal(`${r.year} 年目 市長選挙の結果：${r.won ? '当選' : '落選'}`, [res, para(msg), table], [{ label: '閉じる', primary: true }]);
+  if (!r.won) tools.select('none');
+}
+
 // ---------- 地区の名前ラベル ----------
 const labelsEl = $('labels');
 const labelEls = new Map<number, HTMLSpanElement>();
@@ -313,6 +389,8 @@ function frame(now: number): void {
   const dt = Math.min(0.1, (now - last) / 1000);
   last = now;
   view.sync(sim.day);
+  hall.update();
+  checkPolitics();
   world.render(dt);
   updateProbe(dt);
   updateLabels();
